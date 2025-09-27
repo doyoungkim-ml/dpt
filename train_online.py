@@ -57,12 +57,11 @@ class OnlineEnvironmentManager:
         } for i in range(len(self.envs))}
 
     def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, debug=False):
-        """Step environments and immediately learn from optimal actions."""
-        total_loss = 0.0
-        num_steps = 0
+        """Step environments and learn from optimal actions using batched processing."""
         debug_info = {'env_steps': []} if debug else None
-
-        # Step each environment
+        
+        # PHASE 1: Collect data from all environments
+        env_data = []
         for env_idx in range(len(self.envs)):
             env = self.envs[env_idx]
 
@@ -78,11 +77,10 @@ class OnlineEnvironmentManager:
                 current_state = env.agent.dir_vec[[0, -1]]
 
             # DEBUG: Current context info
-            if debug:
-                context_size = len(self.contexts[env_idx]['states'])
-                recent_rewards = self.contexts[env_idx]['rewards'][-3:] if self.contexts[env_idx]['rewards'] else []
+            context_size = len(self.contexts[env_idx]['states']) if debug else 0
+            recent_rewards = self.contexts[env_idx]['rewards'][-3:] if debug and self.contexts[env_idx]['rewards'] else []
                 
-            # Get model's action prediction
+            # 1. Get model's action prediction BEFORE adding to context
             if self.model is not None:
                 model_action = self._get_model_action(env_idx, current_state, debug=debug)
             else:
@@ -100,67 +98,7 @@ class OnlineEnvironmentManager:
                 _, reward, _, _, _ = env.step(action_idx)
                 next_state = env.agent.dir_vec[[0, -1]]
 
-            # IMMEDIATE LEARNING: Get optimal action and do gradient update
-            training_sample = self._create_training_sample(env, env_idx, current_state)
-            optimal_action = training_sample['optimal_action']
-
-            # Convert to tensor batch (single sample)
-            if self.env_type == 'miniworld':
-                batch = batch_to_tensors([training_sample], self.config, self.env_type, self.kwargs.get('transform'))
-            else:
-                batch = batch_to_tensors([training_sample], self.config, self.env_type)
-
-            # Move to device
-            batch = {k: v.to(device) for k, v in batch.items()}
-
-            # Forward pass
-            true_actions = batch['optimal_actions']
-            pred_actions = self.model(batch)
-            
-            # DEBUG: Store prediction info before reshaping
-            if debug:
-                pred_probs = torch.softmax(pred_actions[0, -1], dim=-1)
-                pred_action_idx = torch.argmax(pred_probs).item()
-                optimal_action_idx = np.argmax(optimal_action)
-                pred_confidence = pred_probs[pred_action_idx].item()
-                
-            true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)
-            true_actions = true_actions.reshape(-1, action_dim)
-            pred_actions = pred_actions.reshape(-1, action_dim)
-
-            # Backward pass - immediate gradient update
-            optimizer.zero_grad()
-            loss = loss_fn(pred_actions, true_actions)
-            loss.backward()
-            optimizer.step()
-
-            step_loss = loss.item() / horizon
-            total_loss += step_loss
-            num_steps += 1
-
-            # DEBUG: Print step information
-            if debug:
-                print(f"Env {env_idx}: Context={context_size}, State={current_state}, ModelAction={np.argmax(model_action)}, OptimalAction={optimal_action_idx}, Match={pred_action_idx == optimal_action_idx}, Reward={reward}, Loss={step_loss:.4f}")
-                
-                step_debug = {
-                    'env_idx': env_idx,
-                    'current_state': current_state.tolist(),
-                    'context_size': context_size,
-                    'recent_rewards': recent_rewards,
-                    'model_action': model_action.tolist(),
-                    'model_action_idx': np.argmax(model_action),
-                    'optimal_action': optimal_action.tolist(),
-                    'optimal_action_idx': optimal_action_idx,
-                    'pred_action_idx': pred_action_idx,
-                    'pred_confidence': pred_confidence,
-                    'action_match': pred_action_idx == optimal_action_idx,
-                    'reward': reward,
-                    'step_loss': step_loss,
-                    'next_state': next_state.tolist()
-                }
-                debug_info['env_steps'].append(step_debug)
-
-            # NOW add transition to context (after learning)
+            # 2. Add transition to context BEFORE learning
             self.contexts[env_idx]['states'].append(current_state)
             self.contexts[env_idx]['actions'].append(model_action)
             self.contexts[env_idx]['next_states'].append(next_state)
@@ -171,9 +109,95 @@ class OnlineEnvironmentManager:
                 for key in self.contexts[env_idx]:
                     self.contexts[env_idx][key] = self.contexts[env_idx][key][-self.horizon:]
 
+            # Store data for batched processing
+            env_data.append({
+                'env_idx': env_idx,
+                'env': env,
+                'current_state': current_state,
+                'model_action': model_action,
+                'reward': reward,
+                'next_state': next_state,
+                'context_size': context_size,
+                'recent_rewards': recent_rewards
+            })
+
+        # PHASE 2: Create batch of training samples
+        training_samples = []
+        for data in env_data:
+            training_sample = self._create_training_sample(data['env'], data['env_idx'], data['current_state'])
+            training_samples.append(training_sample)
+
+        # PHASE 3: Batched forward and backward pass
+        if self.env_type == 'miniworld':
+            batch = batch_to_tensors(training_samples, self.config, self.env_type, self.kwargs.get('transform'))
+        else:
+            batch = batch_to_tensors(training_samples, self.config, self.env_type)
+
+        # Move to device
+        batch = {k: v.to(device) for k, v in batch.items()}
+
+        # Forward pass for entire batch
+        true_actions = batch['optimal_actions']  # Shape: [batch_size, action_dim]
+        pred_actions = self.model(batch)         # Shape: [batch_size, horizon, action_dim]
+        
+        # Reshape for loss computation
+        batch_size = true_actions.shape[0]
+        true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)  # [batch_size, horizon, action_dim]
+        true_actions = true_actions.reshape(-1, action_dim)  # [batch_size * horizon, action_dim]
+        pred_actions = pred_actions.reshape(-1, action_dim)  # [batch_size * horizon, action_dim]
+
+        # Single backward pass for entire batch
+        optimizer.zero_grad()
+        loss = loss_fn(pred_actions, true_actions)
+        loss.backward()
+        optimizer.step()
+
+        # Compute average loss per sample
+        total_loss = loss.item() / (batch_size * horizon)
+
+        # PHASE 4: Debug output (show first 3 environments)
+        if debug and len(env_data) > 0:
+            # Show debug info for first 3 environments
+            num_debug_envs = min(1, len(env_data))
+            
+            for debug_idx in range(num_debug_envs):
+                data = env_data[debug_idx]
+                env_idx = data['env_idx']
+                
+                # Extract predictions for this environment
+                pred_probs = torch.softmax(pred_actions.view(batch_size, horizon, action_dim)[debug_idx, -1], dim=-1)
+                optimal_action = training_samples[debug_idx]['optimal_action']
+                optimal_action_idx = np.argmax(optimal_action)
+                sampled_action_idx = np.argmax(data['model_action'])
+                sampling_match = sampled_action_idx == optimal_action_idx
+                
+                # Format probability distribution for display
+                if self.env_type in ['bandit', 'linear_bandit']:
+                    prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
+                else:
+                    prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
+                
+                print(f"Batch: Env {env_idx}: Context={data['context_size']}, Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
+                
+                step_debug = {
+                    'env_idx': env_idx,
+                    'current_state': data['current_state'].tolist(),
+                    'context_size': data['context_size'],
+                    'recent_rewards': data['recent_rewards'],
+                    'pred_probs': pred_probs.tolist(),
+                    'sampled_action_idx': sampled_action_idx,
+                    'optimal_action_idx': optimal_action_idx,
+                    'sampling_match': sampling_match,
+                    'reward': data['reward'],
+                    'step_loss': total_loss,
+                    'next_state': data['next_state'].tolist(),
+                    'batch_size': batch_size
+                }
+                debug_info['env_steps'].append(step_debug)
+
         if debug:
-            return total_loss / num_steps if num_steps > 0 else 0.0, debug_info
-        return total_loss / num_steps if num_steps > 0 else 0.0
+            return total_loss, debug_info
+        return total_loss
 
     def _get_model_action(self, env_idx, query_state, debug=False):
         """Get action from model given current context and query state."""
@@ -433,7 +457,7 @@ if __name__ == '__main__':
     env = args['env']
     n_envs = args['envs']
     n_hists = args['hists']
-    n_samples = args['samples']
+    n_samples = args['H'] * args['envs']
     horizon = args['H']
     dim = args['dim']
     state_dim = dim
@@ -484,7 +508,7 @@ if __name__ == '__main__':
     # Setup environments for online sampling
     if env == 'bandit':
         state_dim = 1
-        train_envs = [bandit_env.sample(dim, horizon, var) for _ in range(min(100, n_envs))]
+        train_envs = [bandit_env.sample(dim, horizon, var) for _ in range(n_envs)]
 
         model_config.update({'var': var, 'cov': cov})
         filename = build_bandit_model_filename(env, model_config)
@@ -494,7 +518,7 @@ if __name__ == '__main__':
         # Generate fixed features for arms
         rng = np.random.RandomState(seed=1234)
         arms = rng.normal(size=(dim, lin_d)) / np.sqrt(lin_d)
-        train_envs = [bandit_env.sample_linear(arms, horizon, var) for _ in range(min(100, n_envs))]
+        train_envs = [bandit_env.sample_linear(arms, horizon, var) for _ in range(n_envs)]
 
         model_config.update({'lin_d': lin_d, 'var': var, 'cov': cov})
         filename = build_linear_bandit_model_filename(env, model_config)
@@ -507,12 +531,12 @@ if __name__ == '__main__':
         np.random.RandomState(seed=0).shuffle(goals)
         train_test_split = int(.8 * len(goals))
         train_goals = goals[:train_test_split]
-        train_goals = np.repeat(train_goals, max(1, min(100, n_envs) // len(train_goals)), axis=0)[:min(100, n_envs)]
+        train_goals = np.repeat(train_goals, max(1, n_envs // len(train_goals)), axis=0)[:n_envs]
 
         if env == 'darkroom_heldout':
             train_envs = [darkroom_env.DarkroomEnv(dim, goal, horizon) for goal in train_goals]
         else:
-            train_envs = [darkroom_env.DarkroomEnvPermuted(dim, i, horizon) for i in range(min(100, n_envs))]
+            train_envs = [darkroom_env.DarkroomEnvPermuted(dim, i, horizon) for i in range(n_envs)]
 
         filename = build_darkroom_model_filename(env, model_config)
 
@@ -524,7 +548,7 @@ if __name__ == '__main__':
         action_dim = 4
         target_shape = (25, 25, 3)
         gym_env = gym.make('MiniWorld-OneRoomS6FastMultiFourBoxesFixedInit-v0')
-        train_env_ids = list(range(min(100, n_envs)))
+        train_env_ids = list(range(n_envs))
 
         filename = build_miniworld_model_filename(env, model_config)
 
@@ -597,13 +621,11 @@ if __name__ == '__main__':
         epoch_train_loss = 0.0
         epoch_iterations = 0
 
-        # Online learning: model samples actions, immediately learns from optimal actions
-        iterations_per_epoch = max(1, n_samples // len(train_envs))
 
-        for iteration in range(iterations_per_epoch):
+        for iteration in range(horizon):
             # Step all environments and do immediate gradient updates
             # Enable debug for first few iterations if debug mode is on
-            should_debug = debug_mode and (epoch == 0 and iteration < 10)
+            should_debug = debug_mode #and (epoch == 0 and iteration < 10)
             
             if should_debug:
                 iteration_loss, debug_info = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, debug=True)
@@ -616,7 +638,7 @@ if __name__ == '__main__':
             total_iterations += 1
 
             if iteration % 10 == 0:
-                print(f"Epoch {epoch+1}, Iteration {iteration}/{iterations_per_epoch}, Loss: {iteration_loss:.6f}", end='\r')
+                print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}", end='\r')
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()

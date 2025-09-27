@@ -20,16 +20,10 @@ To create a new conda environment, open your terminal and run the following comm
 conda create --name dpt python=3.9.15
 ```
 
-Install PyTorch by following the [official instructions here](https://pytorch.org/get-started/locally/) appropriately for your system. The recommended versions for the related packages are as follows with CUDA 11.7:
+Install PyTorch by following the [official instructions here](https://pytorch.org/get-started/locally/) appropriately for your system. The recommended versions for the related packages are as follows with CUDA 12.1:
 
 ```bash
-torch==1.13.0
-torchvision==0.14.0
-```
-For example, you might run:
-
-```bash
-conda install pytorch=1.13.0 torchvision=0.14.0 cudatoolkit=11.7 -c pytorch -c nvidia
+conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia -y
 ```
 
 The remaining requirements are fairly standard and are listed in the `requirements.txt`. These can be installed by running
