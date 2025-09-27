@@ -1,0 +1,2 @@
+# Train online darkroom
+python3 train_online.py --env darkroom_heldout --envs 100000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --samples 10000 --num_epochs 200

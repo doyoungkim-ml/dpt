@@ -1,0 +1,26 @@
++++ dirname /opt/slurm/data/slurmd/job02862/slurm_script
+++ cd /opt/slurm/data/slurmd/job02862
+++ pwd
++ SCRIPT_DIR=/opt/slurm/data/slurmd/job02862
++ SUBMIT_DIR=/home/dk5268/decision-pretrained-transformer
++ '[' -f /home/dk5268/decision-pretrained-transformer/collect_data.py ']'
++ '[' -f /home/dk5268/decision-pretrained-transformer/train.py ']'
++ PROJECT_ROOT=/home/dk5268/decision-pretrained-transformer
++ cd /home/dk5268/decision-pretrained-transformer
++ export PYTHONPATH=/home/dk5268/decision-pretrained-transformer:
++ PYTHONPATH=/home/dk5268/decision-pretrained-transformer:
++ mkdir -p logs
++ export CUDA_VISIBLE_DEVICES=0
++ CUDA_VISIBLE_DEVICES=0
++ echo 'Starting linear bandit training job'
++ echo 'Project root: /home/dk5268/decision-pretrained-transformer'
+++ pwd
++ echo 'Working directory: /home/dk5268/decision-pretrained-transformer'
++ echo 'CUDA devices: 0'
++ echo 'Collecting data...'
++ python3 collect_data.py --env linear_bandit --envs 1000000 --H 200 --dim 10 --var 0.3 --cov 0.0 --lin_d 2 --envs_eval 200
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/opt/slurm/data/slurmd/job02862/slurm_script: line 62: 252530 Killed                  python3 collect_data.py --env linear_bandit --envs 1000000 --H 200 --dim 10 --var 0.3 --cov 0.0 --lin_d 2 --envs_eval 200
+[2025-09-19T03:20:39.131] error: Detected 1 oom_kill event in StepId=2862.batch. Some of the step tasks have been OOM Killed.

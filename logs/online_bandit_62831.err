@@ -1,0 +1,46 @@
++++ dirname /opt/slurm/data/slurmd/job62831/slurm_script
+++ cd /opt/slurm/data/slurmd/job62831
+++ pwd
++ SCRIPT_DIR=/opt/slurm/data/slurmd/job62831
++ SUBMIT_DIR=/home/dk5268/decision-pretrained-transformer
++ '[' -f /home/dk5268/decision-pretrained-transformer/collect_data.py ']'
++ '[' -f /home/dk5268/decision-pretrained-transformer/train.py ']'
++ PROJECT_ROOT=/home/dk5268/decision-pretrained-transformer
++ cd /home/dk5268/decision-pretrained-transformer
++ export PYTHONPATH=/home/dk5268/decision-pretrained-transformer:
++ PYTHONPATH=/home/dk5268/decision-pretrained-transformer:
++ mkdir -p logs
++ export CUDA_VISIBLE_DEVICES=0
++ CUDA_VISIBLE_DEVICES=0
++ echo 'Starting online bandit training job'
++ echo 'Project root: /home/dk5268/decision-pretrained-transformer'
+++ pwd
++ echo 'Working directory: /home/dk5268/decision-pretrained-transformer'
++ echo 'CUDA devices: 0'
++ echo 'Training online model...'
++ python3 train_online.py --env bandit --envs 100000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --samples 10000 --num_epochs 400
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+Traceback (most recent call last):
+  File "/home/dk5268/decision-pretrained-transformer/train_online.py", line 451, in <module>
+    pred_actions = model(batch)
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1190, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/dk5268/decision-pretrained-transformer/net.py", line 55, in forward
+    transformer_outputs = self.transformer(inputs_embeds=stacked_inputs)
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1190, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 752, in forward
+    outputs = block(
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1190, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 290, in forward
+    attn_outputs = self.attn(
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1190, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 241, in forward
+    attn_outputs = self._attn(query, key, value, attention_mask, head_mask, output_attentions)
+  File "/home/dk5268/miniconda3/envs/dpt/lib/python3.9/site-packages/transformers/models/gpt2/modeling_gpt2.py", line 170, in _attn
+    w = w / (float(v.size(-1)) ** 0.5)
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 5.98 GiB (GPU 0; 44.39 GiB total capacity; 42.07 GiB already allocated; 647.31 MiB free; 42.88 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF

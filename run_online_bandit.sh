@@ -1,0 +1,2 @@
+# Train online bandit
+python3 train_online.py --env bandit --envs 100000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --samples 10000 --num_epochs 400

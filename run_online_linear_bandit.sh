@@ -1,0 +1,2 @@
+# Train online linear bandit
+python3 train_online.py --env linear_bandit --envs 1000000 --H 200 --dim 10 --lin_d 2 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --seed 1 --samples_per_iter 64 --samples 20000 --num_epochs 100

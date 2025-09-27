@@ -1,0 +1,9 @@
+Starting online bandit training job
+Project root: /home/dk5268/decision-pretrained-transformer
+Working directory: /home/dk5268/decision-pretrained-transformer
+CUDA devices: 0
+Training online model...
+Args:  {'envs': 100000, 'envs_eval': 100, 'hists': 1, 'samples': 10000, 'H': 500, 'dim': 5, 'lin_d': 2, 'var': 0.3, 'cov': 0.0, 'env': 'bandit', 'env_id_start': -1, 'env_id_end': -1, 'embd': 32, 'head': 4, 'layer': 4, 'lr': 0.0001, 'dropout': 0, 'shuffle': True, 'num_epochs': 400, 'seed': 1, 'samples_per_iter': 64}
+Starting online training for bandit
+Model filename: bandit_shufTrue_lr0.0001_do0_embd32_layer4_head4_envs100000_hists1_samples10000_var0.3_cov0.0_H500_d5_seed1
+Epoch: 1

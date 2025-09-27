@@ -1,0 +1,34 @@
++++ dirname /opt/slurm/data/slurmd/job62834/slurm_script
+++ cd /opt/slurm/data/slurmd/job62834
+++ pwd
++ SCRIPT_DIR=/opt/slurm/data/slurmd/job62834
++ SUBMIT_DIR=/home/dk5268/decision-pretrained-transformer
++ '[' -f /home/dk5268/decision-pretrained-transformer/collect_data.py ']'
++ '[' -f /home/dk5268/decision-pretrained-transformer/train.py ']'
++ PROJECT_ROOT=/home/dk5268/decision-pretrained-transformer
++ cd /home/dk5268/decision-pretrained-transformer
++ export PYTHONPATH=/home/dk5268/decision-pretrained-transformer:
++ PYTHONPATH=/home/dk5268/decision-pretrained-transformer:
++ mkdir -p logs
++ export CUDA_VISIBLE_DEVICES=0
++ CUDA_VISIBLE_DEVICES=0
++ echo 'Starting online bandit training job'
++ echo 'Project root: /home/dk5268/decision-pretrained-transformer'
+++ pwd
++ echo 'Working directory: /home/dk5268/decision-pretrained-transformer'
++ echo 'CUDA devices: 0'
++ echo 'Training online model...'
++ python3 train_online.py --env bandit --envs 100000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --samples 10000 --num_epochs 400
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+Traceback (most recent call last):
+  File "/home/dk5268/decision-pretrained-transformer/train_online.py", line 535, in <module>
+    batch_data = env_manager.step_and_sample_batch(batch_size=samples_per_iter)
+  File "/home/dk5268/decision-pretrained-transformer/train_online.py", line 85, in step_and_sample_batch
+    model_action = self._get_model_action(env_idx, current_state)
+  File "/home/dk5268/decision-pretrained-transformer/train_online.py", line 131, in _get_model_action
+    batch = batch_to_tensors_standard([sample], self.config)
+  File "/home/dk5268/decision-pretrained-transformer/train_online.py", line 282, in batch_to_tensors_standard
+    optimal_actions[i] = torch.from_numpy(sample['optimal_action']).float()
+KeyError: 'optimal_action'
