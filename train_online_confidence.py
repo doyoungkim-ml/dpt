@@ -154,9 +154,10 @@ class OnlineEnvironmentManager:
             selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
         
         # CONFIDENCE-BASED TARGET INTERPOLATION
-        # Interpolate between true actions (one-hot) and model prediction logits
-        # target = confidence * true_actions + (1 - confidence) * model_logits
-        interpolated_targets = confidence * true_actions + (1 - confidence) * selected_pred_actions
+        # Interpolate between true actions (one-hot) and model prediction probabilities
+        # Convert logits to probabilities first
+        pred_probs = torch.softmax(selected_pred_actions, dim=-1)
+        interpolated_targets = confidence * true_actions + (1 - confidence) * pred_probs
         
         # Single backward pass for entire batch
         optimizer.zero_grad()
