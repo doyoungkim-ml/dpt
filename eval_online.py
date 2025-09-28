@@ -259,6 +259,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--online_suffix', type=str, default='_online', 
                        help='Suffix for online model files (e.g., "_online")')
+    parser.add_argument('--confidence', action='store_true',
+                       help='Use confidence-trained model (loads models with _online_confidence suffix)')
 
     args = vars(parser.parse_args())
     print("Args: ", args)
@@ -286,6 +288,8 @@ if __name__ == '__main__':
     seed = args['seed']
     lin_d = args['lin_d']
     online_suffix = args['online_suffix']
+    confidence = args['confidence']
+    confidence_suffix = "_confidence" if confidence else ""
     
     tmp_seed = seed
     if seed == -1:
@@ -368,10 +372,16 @@ if __name__ == '__main__':
         model = Transformer(config).to(device)
     
     tmp_filename = filename
-    if epoch < 0:
-        model_path = f'models/{tmp_filename}{online_suffix}.pt'
+    # Use confidence suffix if confidence flag is set
+    if confidence:
+        model_suffix = '_online_confidence'
     else:
-        model_path = f'models/{tmp_filename}{online_suffix}_epoch{epoch}.pt'
+        model_suffix = online_suffix
+    
+    if epoch < 0:
+        model_path = f'models/{tmp_filename}{model_suffix}.pt'
+    else:
+        model_path = f'models/{tmp_filename}{model_suffix}_epoch{epoch}.pt'
     
     print(f"Loading model from: {model_path}")
     checkpoint = torch.load(model_path)
@@ -383,19 +393,19 @@ if __name__ == '__main__':
     
     if envname in ['bandit', 'bandit_bernoulli']:
         eval_envs = generate_bandit_environments(n_eval, dim, var, bandit_type)
-        save_filename = f'{filename}_testcov{test_cov}_hor{horizon}_online'
+        save_filename = f'{filename}_testcov{test_cov}_hor{horizon}_online{confidence_suffix}'
         
     elif envname == 'linear_bandit':
         eval_envs = generate_linear_bandit_environments(n_eval, dim, lin_d, var)
-        save_filename = f'{filename}_testcov{test_cov}_hor{horizon}_online'
+        save_filename = f'{filename}_testcov{test_cov}_hor{horizon}_online{confidence_suffix}'
         
     elif envname.startswith('darkroom'):
         eval_envs = generate_darkroom_environments(n_eval, dim, envname)
-        save_filename = f'{filename}_hor{horizon}_online'
+        save_filename = f'{filename}_hor{horizon}_online{confidence_suffix}'
         
     elif envname == 'miniworld':
         eval_envs = generate_miniworld_environments(n_eval)
-        save_filename = f'{filename}_hor{horizon}_online'
+        save_filename = f'{filename}_hor{horizon}_online{confidence_suffix}'
     else:
         raise ValueError(f'Environment {envname} not supported')
 
@@ -405,7 +415,7 @@ if __name__ == '__main__':
     print(f"Generated {n_eval} evaluation trajectories")
 
     # Create output directories
-    evals_filename = f"evals_online_{model_path}"
+    evals_filename = f"evals_online{confidence_suffix}_{model_path}"
     if not os.path.exists(f'figs/{evals_filename}'):
         os.makedirs(f'figs/{evals_filename}', exist_ok=True)
     if not os.path.exists(f'figs/{evals_filename}/bar'):

@@ -64,7 +64,7 @@ python3 train_online_confidence.py --env darkroom_heldout --envs 10000 --H 100 -
 # Evaluate, choose an appropriate epoch
 echo "Evaluating model..."
 for epoch in {1..10}; do
-    python3 eval_online.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1
+    python3 eval_online.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1 --confidence
 done
 
 echo "Online darkroom training job with confidence completed!"

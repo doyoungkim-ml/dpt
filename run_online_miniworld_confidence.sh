@@ -3,5 +3,5 @@ xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" pytho
 
 # Evaluate
 for epoch in {1..10}; do
-    xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python3 eval_online.py --env miniworld --envs 1000 --H 50 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1
+    xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python3 eval_online.py --env miniworld --envs 1000 --H 50 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1 --confidence
 done
