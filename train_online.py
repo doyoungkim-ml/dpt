@@ -139,21 +139,24 @@ class OnlineEnvironmentManager:
         # Forward pass for entire batch
         true_actions = batch['optimal_actions']  # Shape: [batch_size, action_dim]
         pred_actions = self.model(batch)         # Shape: [batch_size, horizon, action_dim]
+        loss_positions = batch['loss_positions'] # Shape: [batch_size]
         
-        # Reshape for loss computation
+        # Extract predictions at specific positions for each batch item
         batch_size = true_actions.shape[0]
-        true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)  # [batch_size, horizon, action_dim]
-        true_actions = true_actions.reshape(-1, action_dim)  # [batch_size * horizon, action_dim]
-        pred_actions = pred_actions.reshape(-1, action_dim)  # [batch_size * horizon, action_dim]
-
+        selected_pred_actions = torch.zeros_like(true_actions)  # [batch_size, action_dim]
+        
+        for i in range(batch_size):
+            pos = loss_positions[i].item()
+            selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
+        
         # Single backward pass for entire batch
         optimizer.zero_grad()
-        loss = loss_fn(pred_actions, true_actions)
+        loss = loss_fn(selected_pred_actions, true_actions)
         loss.backward()
         optimizer.step()
 
-        # Compute average loss per sample
-        total_loss = loss.item() / (batch_size * horizon)
+        # Compute average loss per sample (only one position per sample now)
+        total_loss = loss.item() / batch_size
 
         # PHASE 4: Debug output (show first 3 environments)
         if debug and len(env_data) > 0:
@@ -176,7 +179,6 @@ class OnlineEnvironmentManager:
                     prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
                 else:
                     prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
-                
                 print(f"Batch: Env {env_idx}: Context={data['context_size']}, Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
                 
                 step_debug = {
@@ -229,16 +231,20 @@ class OnlineEnvironmentManager:
             self.model.eval()
             pred_actions = self.model(batch)
 
+            # Get the position to sample from (last non-padded position)
+            context_len = len(self.contexts[env_idx]['states'])
+            sample_pos = min(context_len, pred_actions.shape[1] - 1)
+            
             # Sample action (you can use softmax sampling or argmax)
             if self.env_type == 'miniworld':
                 # For discrete actions, use softmax sampling
-                probs = torch.softmax(pred_actions[0, -1], dim=-1)
+                probs = torch.softmax(pred_actions[0, sample_pos], dim=-1)
                 action_idx = torch.multinomial(probs, 1).item()
                 action = np.zeros(self.envs[env_idx].action_space.n)
                 action[action_idx] = 1.0
             else:
                 # For continuous/bandit actions, use softmax sampling over action space
-                probs = torch.softmax(pred_actions[0, -1], dim=-1)
+                probs = torch.softmax(pred_actions[0, sample_pos], dim=-1)
                 action_idx = torch.multinomial(probs, 1).item()
                 action = np.zeros(len(probs))
                 action[action_idx] = 1.0
@@ -262,7 +268,7 @@ class OnlineEnvironmentManager:
         """Create sample for model input (without optimal action)."""
         context = self.contexts[env_idx]
 
-        # Pad context if needed
+        # RIGHT PADDING: Pad context if needed
         context_len = len(context['states'])
         if context_len < self.horizon:
             pad_len = self.horizon - context_len
@@ -271,11 +277,12 @@ class OnlineEnvironmentManager:
                 dummy_state = np.zeros(2)
                 dummy_action = np.zeros(self.envs[env_idx].action_space.n)
 
-                padded_images = [dummy_image] * pad_len + context.get('images', [dummy_image] * context_len)
-                padded_states = [dummy_state] * pad_len + context['states']
-                padded_actions = [dummy_action] * pad_len + context['actions']
-                padded_next_states = [dummy_state] * pad_len + context['next_states']
-                padded_rewards = [0.0] * pad_len + context['rewards']
+                # RIGHT PADDING: real data first, then padding
+                padded_images = context.get('images', [dummy_image] * context_len) + [dummy_image] * pad_len
+                padded_states = context['states'] + [dummy_state] * pad_len
+                padded_actions = context['actions'] + [dummy_action] * pad_len
+                padded_next_states = context['next_states'] + [dummy_state] * pad_len
+                padded_rewards = context['rewards'] + [0.0] * pad_len
 
                 return {
                     'query_image': env.render_obs(),
@@ -285,6 +292,7 @@ class OnlineEnvironmentManager:
                     'context_actions': np.array(padded_actions),
                     'context_next_states': np.array(padded_next_states),
                     'context_rewards': np.array(padded_rewards),
+                    'loss_position': context_len - 1,  # Position for loss calculation
                 }
             else:
                 if self.env_type in ['bandit', 'linear_bandit']:
@@ -294,10 +302,11 @@ class OnlineEnvironmentManager:
                     dummy_state = np.zeros(2)
                     dummy_action = np.zeros(5)
 
-                padded_states = [dummy_state] * pad_len + context['states']
-                padded_actions = [dummy_action] * pad_len + context['actions']
-                padded_next_states = [dummy_state] * pad_len + context['next_states']
-                padded_rewards = [0.0] * pad_len + context['rewards']
+                # RIGHT PADDING: real data first, then padding
+                padded_states = context['states'] + [dummy_state] * pad_len
+                padded_actions = context['actions'] + [dummy_action] * pad_len
+                padded_next_states = context['next_states'] + [dummy_state] * pad_len
+                padded_rewards = context['rewards'] + [0.0] * pad_len
         else:
             padded_states = context['states']
             padded_actions = context['actions']
@@ -310,6 +319,7 @@ class OnlineEnvironmentManager:
             'context_actions': np.array(padded_actions),
             'context_next_states': np.array(padded_next_states),
             'context_rewards': np.array(padded_rewards),
+            'loss_position': min(context_len - 1, self.horizon - 1),  # Position for loss calculation
         }
 
     def _create_training_sample(self, env, env_idx, query_state):
@@ -365,6 +375,7 @@ def batch_to_tensors_standard(batch_data, config):
     context_actions = torch.zeros(batch_size, horizon, action_dim)
     context_next_states = torch.zeros(batch_size, horizon, state_dim)
     context_rewards = torch.zeros(batch_size, horizon, 1)
+    loss_positions = torch.zeros(batch_size, dtype=torch.long)  # Positions for loss calculation
 
     # Create zeros tensor like in Dataset class
     zeros = torch.zeros(state_dim ** 2 + action_dim + 1)
@@ -376,6 +387,7 @@ def batch_to_tensors_standard(batch_data, config):
         context_actions[i] = torch.from_numpy(sample['context_actions']).float()
         context_next_states[i] = torch.from_numpy(sample['context_next_states']).float()
         context_rewards[i] = torch.from_numpy(sample['context_rewards']).float().unsqueeze(-1)
+        loss_positions[i] = sample['loss_position']
 
     return {
         'query_states': query_states,
@@ -384,6 +396,7 @@ def batch_to_tensors_standard(batch_data, config):
         'context_actions': context_actions,
         'context_next_states': context_next_states,
         'context_rewards': context_rewards,
+        'loss_positions': loss_positions,
         'zeros': zeros.unsqueeze(0).repeat(batch_size, 1),
     }
 
@@ -405,6 +418,7 @@ def batch_to_tensors_miniworld(batch_data, config, transform):
     context_states = torch.zeros(batch_size, horizon, state_dim)
     context_actions = torch.zeros(batch_size, horizon, action_dim)
     context_rewards = torch.zeros(batch_size, horizon, 1)
+    loss_positions = torch.zeros(batch_size, dtype=torch.long)  # Positions for loss calculation
 
     # Create zeros tensor like in Dataset class
     zeros = torch.zeros(state_dim ** 2 + action_dim + 1)
@@ -424,6 +438,7 @@ def batch_to_tensors_miniworld(batch_data, config, transform):
         context_states[i] = torch.from_numpy(sample['context_states']).float()
         context_actions[i] = torch.from_numpy(sample['context_actions']).float()
         context_rewards[i] = torch.from_numpy(sample['context_rewards']).float().unsqueeze(-1)
+        loss_positions[i] = sample['loss_position']
 
     return {
         'query_images': query_images,
@@ -433,6 +448,7 @@ def batch_to_tensors_miniworld(batch_data, config, transform):
         'context_states': context_states,
         'context_actions': context_actions,
         'context_rewards': context_rewards,
+        'loss_positions': loss_positions,
         'zeros': zeros.unsqueeze(0).repeat(batch_size, 1),
     }
 
