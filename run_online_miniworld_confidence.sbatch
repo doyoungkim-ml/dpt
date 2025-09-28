@@ -5,9 +5,9 @@
 #################################
 
 #SBATCH --nodes=1                                   # Number of nodes to use
-#SBATCH --job-name=online_darkroom_dpt              # Name of your job
-#SBATCH --output=logs/online_darkroom_%j.out        # Log file for stdout
-#SBATCH --error=logs/online_darkroom_%j.err         # Log file for stderr
+#SBATCH --job-name=online_miniworld_confidence_dpt  # Name of your job
+#SBATCH --output=logs/online_miniworld_confidence_%j.out       # Log file for stdout
+#SBATCH --error=logs/online_miniworld_confidence_%j.err        # Log file for stderr
 #SBATCH --constraint="l40s"                         # Request L40S GPU
 #SBATCH --gres=gpu:1                                # Request 1 GPU
 #SBATCH --mem=32G                                   # Memory per node
@@ -52,19 +52,19 @@ export CUDA_VISIBLE_DEVICES=0
 ###### Training Script ####
 ###########################
 
-echo "Starting online darkroom training job"
+echo "Starting online miniworld training job with confidence"
 echo "Project root: $PROJECT_ROOT"
 echo "Working directory: $(pwd)"
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
-# Train online (no data collection needed)
-echo "Training online model..."
-python3 train_online.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --num_epochs 10
+# Train online with confidence (no data collection needed)
+echo "Training online model with confidence..."
+xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python3 train_online_confidence.py --env miniworld --envs 1000 --H 50 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 32 --samples 5000 --num_epochs 10 --confidence_start 0.3
 
 # Evaluate, choose an appropriate epoch
 echo "Evaluating model..."
 for epoch in {1..10}; do
-    python3 eval_online.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1
+    xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python3 eval_online.py --env miniworld --envs 1000 --H 50 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1
 done
 
-echo "Online darkroom training job completed!"
+echo "Online miniworld training job with confidence completed!"

@@ -63,6 +63,8 @@ python3 train_online.py --env bandit --envs 1000 --H 100 --dim 5 --var 0.3 --cov
 
 # Evaluate, choose an appropriate epoch
 echo "Evaluating model..."
-python3 eval.py --env bandit --envs 1000 --H 100 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch 1 --n_eval 200 --seed 1
+for epoch in {1..10}; do
+    python3 eval_online.py --env bandit --envs 1000 --H 100 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --n_eval 200 --seed 1
+done
 
 echo "Online bandit training job completed!"
