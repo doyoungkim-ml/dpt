@@ -405,7 +405,7 @@ if __name__ == '__main__':
     print(f"Generated {n_eval} evaluation trajectories")
 
     # Create output directories
-    evals_filename = f"evals_online_epoch{epoch}"
+    evals_filename = f"evals_online_{model_path}"
     if not os.path.exists(f'figs/{evals_filename}'):
         os.makedirs(f'figs/{evals_filename}', exist_ok=True)
     if not os.path.exists(f'figs/{evals_filename}/bar'):
