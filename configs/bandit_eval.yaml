@@ -1,0 +1,22 @@
+# Evaluation configuration for bandit environment
+env: "bandit"
+dim: 10
+var: 0.0
+cov: 0.0
+test_cov: 0.0
+
+# Model configuration
+embd: 32
+head: 1
+layer: 3
+dropout: 0
+
+# Evaluation configuration
+n_eval: 100
+hor: 100
+epoch: -1  # -1 for final model, or specify epoch number
+seed: 0
+
+# For online evaluation, specify confidence type if model was trained with confidence
+# confidence_type: "linear"
+# confidence_start: 0.3

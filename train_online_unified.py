@@ -5,6 +5,7 @@ if mp.get_start_method(allow_none=True) is None:
 import argparse
 import os
 import time
+import yaml
 from IPython import embed
 
 import matplotlib.pyplot as plt
@@ -528,9 +529,27 @@ if __name__ == '__main__':
                        help='Maximum position for stepped confidence (default: horizon/2)')
     parser.add_argument('--confidence_value', type=float, default=1.0,
                        help='Constant confidence value for constant confidence type')
+    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
 
     args = vars(parser.parse_args())
+
+    # Load config from YAML file if provided
+    if args['config']:
+        with open(args['config'], 'r') as f:
+            config_args = yaml.safe_load(f)
+        # Override args with config values
+        args.update(config_args)
+
     print("Args: ", args)
+
+    # Determine experiment identifier (job ID or timestamp)
+    job_id = os.environ.get('SLURM_JOB_ID')
+    if job_id:
+        experiment_id = job_id
+    else:
+        experiment_id = str(int(time.time()))
+
+    print(f"Experiment ID: {experiment_id}")
 
     env = args['env']
     n_envs = args['envs']
@@ -689,8 +708,17 @@ if __name__ == '__main__':
         filename_suffix += f"_val{confidence_value}"
     
     filename = filename.replace('.pt', f'{filename_suffix}.pt')
-    
-    log_filename = f'figs/loss/{filename}_online_unified_logs.txt'
+
+    # Create experiment directory structure
+    experiment_dir = f'models/{env}/{experiment_id}'
+    os.makedirs(experiment_dir, exist_ok=True)
+
+    # Save config file in experiment directory
+    config_path = f'{experiment_dir}/config.yaml'
+    with open(config_path, 'w') as f:
+        yaml.dump(args, f, default_flow_style=False)
+
+    log_filename = f'{experiment_dir}/logs.txt'
     with open(log_filename, 'w') as f:
         pass
     def printw(string):
@@ -785,7 +813,7 @@ if __name__ == '__main__':
 
         # Checkpointing
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
-            torch.save(model.state_dict(), f'models/{filename}_online_unified_epoch{epoch+1}.pt')
+            torch.save(model.state_dict(), f'{experiment_dir}/epoch{epoch+1}.pt')
 
         # Plotting
         if (epoch + 1) % 1 == 0:
@@ -814,8 +842,8 @@ if __name__ == '__main__':
             plt.ylim(0, 1)
             
             plt.tight_layout()
-            plt.savefig(f"figs/loss/{filename}_online_unified_train_loss.png")
+            plt.savefig(f"{experiment_dir}/train_loss.png")
             plt.clf()
 
-    torch.save(model.state_dict(), f'models/{filename}_online_unified.pt')
+    torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
     printw("Online training with unified confidence completed!")

@@ -1,6 +1,7 @@
 import argparse
 import os
 import pickle
+import yaml
 
 import matplotlib.pyplot as plt
 import torch
@@ -32,8 +33,19 @@ if __name__ == '__main__':
     common_args.add_model_args(parser)
     common_args.add_eval_args(parser)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--model_path', type=str, default=None,
+                       help='Direct path to model file (e.g., models/bandits/100/epoch1.pt)')
+    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
 
     args = vars(parser.parse_args())
+
+    # Load config from YAML file if provided
+    if args['config']:
+        with open(args['config'], 'r') as f:
+            config_args = yaml.safe_load(f)
+        # Override args with config values
+        args.update(config_args)
+
     print("Args: ", args)
 
     n_envs = args['envs']
@@ -136,11 +148,15 @@ if __name__ == '__main__':
     else:
         model = Transformer(config).to(device)
     
-    tmp_filename = filename
-    if epoch < 0:
-        model_path = f'models/{tmp_filename}.pt'
+    # Use direct model path if provided, otherwise construct from filename
+    if args['model_path']:
+        model_path = args['model_path']
     else:
-        model_path = f'models/{tmp_filename}_epoch{epoch}.pt'
+        tmp_filename = filename
+        if epoch < 0:
+            model_path = f'models/{tmp_filename}.pt'
+        else:
+            model_path = f'models/{tmp_filename}_epoch{epoch}.pt'
     
     
 

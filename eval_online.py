@@ -1,6 +1,7 @@
 import argparse
 import os
 import pickle
+import yaml
 
 import matplotlib.pyplot as plt
 import torch
@@ -277,8 +278,19 @@ if __name__ == '__main__':
                        help='Use linear confidence-trained model (deprecated, use --confidence_type linear)')
     parser.add_argument('--confidence_exp', action='store_true',
                        help='Use exponential confidence-trained model (deprecated, use --confidence_type exponential)')
+    parser.add_argument('--model_path', type=str, default=None,
+                       help='Direct path to model file (e.g., models/bandits/100/epoch1.pt)')
+    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
 
     args = vars(parser.parse_args())
+
+    # Load config from YAML file if provided
+    if args['config']:
+        with open(args['config'], 'r') as f:
+            config_args = yaml.safe_load(f)
+        # Override args with config values
+        args.update(config_args)
+
     print("Args: ", args)
 
     n_envs = args['envs']
@@ -428,11 +440,15 @@ if __name__ == '__main__':
     else:
         model_suffix = online_suffix
     
-    if epoch < 0:
-        model_path = f'models/{tmp_filename}{model_suffix}.pt'
+    # Use direct model path if provided, otherwise construct from filename
+    if args['model_path']:
+        model_path = args['model_path']
     else:
-        model_path = f'models/{tmp_filename}{model_suffix}_epoch{epoch}.pt'
-    
+        if epoch < 0:
+            model_path = f'models/{tmp_filename}{model_suffix}.pt'
+        else:
+            model_path = f'models/{tmp_filename}{model_suffix}_epoch{epoch}.pt'
+
     print(f"Loading model from: {model_path}")
     checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint)

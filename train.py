@@ -5,6 +5,7 @@ if mp.get_start_method(allow_none=True) is None:
 import argparse
 import os
 import time
+import yaml
 from IPython import embed
 
 import matplotlib.pyplot as plt
@@ -43,9 +44,27 @@ if __name__ == '__main__':
     common_args.add_train_args(parser)
 
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
 
     args = vars(parser.parse_args())
+
+    # Load config from YAML file if provided
+    if args['config']:
+        with open(args['config'], 'r') as f:
+            config_args = yaml.safe_load(f)
+        # Override args with config values
+        args.update(config_args)
+
     print("Args: ", args)
+
+    # Determine experiment identifier (job ID or timestamp)
+    job_id = os.environ.get('SLURM_JOB_ID')
+    if job_id:
+        experiment_id = job_id
+    else:
+        experiment_id = str(int(time.time()))
+
+    print(f"Experiment ID: {experiment_id}")
 
     env = args['env']
     n_envs = args['envs']
@@ -203,7 +222,16 @@ if __name__ == '__main__':
         'shuffle': True,
     }
 
-    log_filename = f'figs/loss/{filename}_logs.txt'
+    # Create experiment directory structure
+    experiment_dir = f'models/{env}/{experiment_id}'
+    os.makedirs(experiment_dir, exist_ok=True)
+
+    # Save config file in experiment directory
+    config_path = f'{experiment_dir}/config.yaml'
+    with open(config_path, 'w') as f:
+        yaml.dump(args, f, default_flow_style=False)
+
+    log_filename = f'{experiment_dir}/logs.txt'
     with open(log_filename, 'w') as f:
         pass
     def printw(string):
@@ -312,7 +340,7 @@ if __name__ == '__main__':
         # LOGGING
         if (epoch + 1) % 50 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
             torch.save(model.state_dict(),
-                       f'models/{filename}_epoch{epoch+1}.pt')
+                       f'{experiment_dir}/epoch{epoch+1}.pt')
 
         # PLOTTING
         if (epoch + 1) % 10 == 0:
@@ -325,8 +353,8 @@ if __name__ == '__main__':
             plt.plot(train_loss[1:], label="Train Loss")
             plt.plot(test_loss[1:], label="Test Loss")
             plt.legend()
-            plt.savefig(f"figs/loss/{filename}_train_loss.png")
+            plt.savefig(f"{experiment_dir}/train_loss.png")
             plt.clf()
 
-    torch.save(model.state_dict(), f'models/{filename}.pt')
+    torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
     print("Done.")
