@@ -255,101 +255,50 @@ def convert_envs_to_trajs_format(envs, env_type, horizon):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    common_args.add_dataset_args(parser)
-    common_args.add_model_args(parser)
-    common_args.add_eval_args(parser)
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--online_suffix', type=str, default='_online', 
-                       help='Suffix for online model files (e.g., "_online")')
-    parser.add_argument('--confidence_type', type=str, default='', 
-                       choices=['', 'linear', 'exponential', 'stepped', 'constant'],
-                       help='Type of confidence function used in training')
-    parser.add_argument('--confidence_start', type=float, default=0.3,
-                       help='Starting confidence value for linear and stepped functions')
-    parser.add_argument('--confidence_lambda', type=float, default=40,
-                       help='Lambda parameter for exponential confidence')
-    parser.add_argument('--max_position', type=int, default=-1,
-                       help='Maximum position for stepped confidence')
-    parser.add_argument('--confidence_value', type=float, default=1.0,
-                       help='Constant confidence value')
-    
-    # Backward compatibility arguments
-    parser.add_argument('--confidence', action='store_true',
-                       help='Use linear confidence-trained model (deprecated, use --confidence_type linear)')
-    parser.add_argument('--confidence_exp', action='store_true',
-                       help='Use exponential confidence-trained model (deprecated, use --confidence_type exponential)')
-    parser.add_argument('--model_path', type=str, default=None,
+    parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
+    parser.add_argument('--model_path', type=str, required=True,
                        help='Direct path to model file (e.g., models/bandits/100/epoch1.pt)')
-    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
 
     args = vars(parser.parse_args())
 
-    # Load config from YAML file if provided
-    if args['config']:
-        with open(args['config'], 'r') as f:
-            config_args = yaml.safe_load(f)
-        # Override args with config values
-        args.update(config_args)
+    # Store model_path separately before loading config
+    model_path = args['model_path']
+
+    # Load config from YAML file
+    with open(args['config'], 'r') as f:
+        config_args = yaml.safe_load(f)
+
+    # Use config values as args, but keep model_path
+    args = config_args
+    args['model_path'] = model_path
 
     print("Args: ", args)
 
-    n_envs = args['envs']
-    n_hists = args['hists']
-    H = args['H']
-    n_samples = args['samples']
-    dim = args['dim']
+    n_envs = args.get('envs', 100)
+    n_hists = args.get('hists', 1)
+    H = args.get('H', 100)
+    n_samples = args.get('samples', 1)
+    dim = args.get('dim', 10)
     state_dim = dim
     action_dim = dim
-    n_embd = args['embd']
-    n_head = args['head']
-    n_layer = args['layer']
-    lr = args['lr']
-    epoch = args['epoch']
-    shuffle = args['shuffle']
-    dropout = args['dropout']
-    var = args['var']
-    cov = args['cov']
-    test_cov = args['test_cov']
+    n_embd = args.get('embd', 32)
+    n_head = args.get('head', 1)
+    n_layer = args.get('layer', 3)
+    lr = args.get('lr', 1e-3)
+    epoch = args.get('epoch', -1)
+    shuffle = args.get('shuffle', False)
+    dropout = args.get('dropout', 0)
+    var = args.get('var', 0.0)
+    cov = args.get('cov', 0.0)
+    test_cov = args.get('test_cov', -1.0)
     envname = args['env']
-    horizon = args['hor']
-    n_eval = args['n_eval']
-    seed = args['seed']
-    lin_d = args['lin_d']
-    online_suffix = args['online_suffix']
-    confidence_type = args['confidence_type']
-    confidence_start = args['confidence_start']
-    confidence_lambda = args['confidence_lambda']
-    max_position = args['max_position']
-    confidence_value = args['confidence_value']
+    horizon = args.get('hor', -1)
+    n_eval = args.get('n_eval', 100)
+    seed = args.get('seed', 0)
+    lin_d = args.get('lin_d', 2)  # Only needed for linear_bandit
+    # Remove online-specific parameters - we get the model directly via model_path
     
-    # Backward compatibility
-    confidence = args['confidence']
-    confidence_exp = args['confidence_exp']
-    
-    # Determine confidence type from arguments
-    if confidence_exp and not confidence_type:
-        confidence_type = 'exponential'
-    elif confidence and not confidence_type:
-        confidence_type = 'linear'
-    
-    # Determine confidence suffix and folder name
-    if confidence_type:
-        confidence_suffix = f"_{confidence_type}"
-        if confidence_type in ['linear', 'stepped']:
-            confidence_suffix += f"_start{confidence_start}"
-        if confidence_type == 'exponential':
-            confidence_suffix += f"_lambda{confidence_lambda}"
-        if confidence_type == 'stepped':
-            if max_position <= 0:
-                max_position = horizon // 2 if horizon > 0 else 250  # default fallback
-            confidence_suffix += f"_maxpos{max_position}"
-        if confidence_type == 'constant':
-            confidence_suffix += f"_val{confidence_value}"
-        
-        confidence_folder_name = confidence_type
-    else:
-        confidence_suffix = ""
-        confidence_folder_name = "standard"
+    # Since we load the model directly from model_path, we don't need confidence logic
     
     tmp_seed = seed
     if seed == -1:
@@ -431,23 +380,8 @@ if __name__ == '__main__':
     else:
         model = Transformer(config).to(device)
     
-    tmp_filename = filename
-    # Use appropriate suffix based on confidence type
-    if confidence_type:
-        # Update filename to include confidence parameters
-        tmp_filename = tmp_filename.replace('.pt', f'{confidence_suffix}.pt')
-        model_suffix = '_online_unified'
-    else:
-        model_suffix = online_suffix
-    
-    # Use direct model path if provided, otherwise construct from filename
-    if args['model_path']:
-        model_path = args['model_path']
-    else:
-        if epoch < 0:
-            model_path = f'models/{tmp_filename}{model_suffix}.pt'
-        else:
-            model_path = f'models/{tmp_filename}{model_suffix}_epoch{epoch}.pt'
+    # Use the required model_path parameter directly
+    model_path = args['model_path']
 
     print(f"Loading model from: {model_path}")
     checkpoint = torch.load(model_path)
@@ -480,10 +414,9 @@ if __name__ == '__main__':
     n_eval = len(eval_trajs)
     print(f"Generated {n_eval} evaluation trajectories")
 
-    # Create output directories organized by confidence function type
+    # Create output directories organized by model
     base_eval_dir = f"evals_online_models"
-    confidence_dir = f"{base_eval_dir}/{confidence_folder_name}"
-    model_specific_dir = f"{confidence_dir}/{os.path.basename(model_path)}"
+    model_specific_dir = f"{base_eval_dir}/{os.path.basename(model_path)}"
     
     # Create directory structure
     for subdir in ['', '/bar', '/online', '/graph']:
@@ -567,7 +500,7 @@ if __name__ == '__main__':
 
     elif envname == 'miniworld':
         from evals import eval_miniworld
-        save_video = args['save_video']
+        save_video = args.get('save_video', False)
         filename_prefix = f'videos/{save_filename}/{evals_filename}/'
         config = {
             'Heps': 40,
@@ -600,8 +533,7 @@ if __name__ == '__main__':
         plt.clf()
 
     print(f"Evaluation complete! Results saved in figs/{evals_filename}/")
-    print(f"Confidence type: {confidence_type if confidence_type else 'standard'}")
     print(f"Online plots: figs/{evals_filename}/online/")
     print(f"Bar plots: figs/{evals_filename}/bar/")
     print(f"Graph plots: figs/{evals_filename}/graph/")
-    print(f"Results organized by confidence function in: figs/{base_eval_dir}/")
+    print(f"Results organized in: figs/{base_eval_dir}/")

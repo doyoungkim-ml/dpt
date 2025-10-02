@@ -510,35 +510,16 @@ if __name__ == '__main__':
         os.makedirs('models', exist_ok=True)
 
     parser = argparse.ArgumentParser()
-    common_args.add_dataset_args(parser)
-    common_args.add_model_args(parser)
-    common_args.add_train_args(parser)
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--samples_per_iter', type=int, default=64, help='Number of samples to generate per iteration')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode with detailed step-by-step logging')
-    
-    # Confidence function arguments
-    parser.add_argument('--confidence_type', type=str, default='linear', 
-                       choices=['linear', 'exponential', 'stepped', 'constant'],
-                       help='Type of confidence function to use')
-    parser.add_argument('--confidence_start', type=float, default=0.3, 
-                       help='Starting confidence value for linear and stepped functions')
-    parser.add_argument('--confidence_lambda', type=float, default=40, 
-                       help='Lambda parameter for exponential confidence schedule: 1 - exp(-t/lambda)')
-    parser.add_argument('--max_position', type=int, default=-1,
-                       help='Maximum position for stepped confidence (default: horizon/2)')
-    parser.add_argument('--confidence_value', type=float, default=1.0,
-                       help='Constant confidence value for constant confidence type')
-    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
+    parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
 
     args = vars(parser.parse_args())
 
-    # Load config from YAML file if provided
-    if args['config']:
-        with open(args['config'], 'r') as f:
-            config_args = yaml.safe_load(f)
-        # Override args with config values
-        args.update(config_args)
+    # Load config from YAML file
+    with open(args['config'], 'r') as f:
+        config_args = yaml.safe_load(f)
+
+    # Use config values as args
+    args = config_args
 
     print("Args: ", args)
 
@@ -552,33 +533,35 @@ if __name__ == '__main__':
     print(f"Experiment ID: {experiment_id}")
 
     env = args['env']
-    n_envs = args['envs']
-    n_hists = args['hists']
-    n_samples = args['samples']
-    horizon = args['H']
-    dim = args['dim']
+    n_envs = args.get('envs', 100)
+    n_hists = args.get('hists', 1)
+    n_samples = args.get('samples', 1)
+    horizon = args.get('H', 100)
+    dim = args.get('dim', 10)
     state_dim = dim
     action_dim = dim
-    n_embd = args['embd']
-    n_head = args['head']
-    n_layer = args['layer']
-    lr = args['lr']
-    shuffle = args['shuffle']
-    dropout = args['dropout']
-    var = args['var']
-    cov = args['cov']
-    num_epochs = args['num_epochs']
-    seed = args['seed']
-    lin_d = args['lin_d']
-    samples_per_iter = args['samples_per_iter']
-    debug_mode = args['debug']
-    
+    n_embd = args.get('embd', 32)
+    n_head = args.get('head', 1)
+    n_layer = args.get('layer', 3)
+    lr = args.get('lr', 1e-3)
+    shuffle = args.get('shuffle', False)
+    dropout = args.get('dropout', 0)
+    var = args.get('var', 0.0)
+    cov = args.get('cov', 0.0)
+    num_epochs = args.get('n_epoch', 100)  # Online uses n_epoch
+    seed = args.get('seed', 0)
+    lin_d = args.get('lin_d', 2)  # Only needed for linear_bandit
+    samples_per_iter = args.get('samples_per_iter', 64)
+    debug_mode = args.get('debug', False)
+
     # Confidence function parameters
-    confidence_type = args['confidence_type']
-    confidence_start = args['confidence_start']
-    confidence_lambda = args['confidence_lambda']
-    max_position = args['max_position'] if args['max_position'] > 0 else horizon // 2
-    confidence_value = args['confidence_value']
+    confidence_type = args.get('confidence_type', 'linear')
+    confidence_start = args.get('confidence_start', 0.3)
+    confidence_lambda = args.get('confidence_lambda', 40)
+    max_position = args.get('max_position', horizon // 2)
+    if max_position <= 0:
+        max_position = horizon // 2
+    confidence_value = args.get('confidence_value', 1.0)
 
     tmp_seed = seed
     if seed == -1:
@@ -802,7 +785,7 @@ if __name__ == '__main__':
                     conf_info += f"(λ={confidence_lambda})"
                 elif confidence_type == 'stepped':
                     conf_info += f"(max_pos={max_position})"
-                print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f} ({conf_info})", end='\r')
+                printw(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f} ({conf_info})")
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()

@@ -9,13 +9,11 @@
 #SBATCH --gres=gpu:1
 
 # Load modules and activate environment
-module load python/3.9
-source venv/bin/activate
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
 # Run online evaluation with config file and model path
-python eval_online.py --config $1 --model_path $2
+python eval_online.py --config "$1" --model_path "$2"
 
 echo "Online evaluation completed"

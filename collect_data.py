@@ -2,6 +2,7 @@ import argparse
 import os
 import pickle
 import random
+import yaml
 
 import gym
 import numpy as np
@@ -353,22 +354,30 @@ if __name__ == '__main__':
     random.seed(0)
 
     parser = argparse.ArgumentParser()
-    common_args.add_dataset_args(parser)
+    parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
+
     args = vars(parser.parse_args())
+
+    # Load config from YAML file
+    with open(args['config'], 'r') as f:
+        config_args = yaml.safe_load(f)
+
+    # Use config values as args
+    args = config_args
     print("Args: ", args)
 
     env = args['env']
-    n_envs = args['envs']
-    n_eval_envs = args['envs_eval']
-    n_hists = args['hists']
-    n_samples = args['samples']
-    horizon = args['H']
-    dim = args['dim']
-    var = args['var']
-    cov = args['cov']
-    env_id_start = args['env_id_start']
-    env_id_end = args['env_id_end']
-    lin_d = args['lin_d']
+    n_envs = args.get('envs', 100000)
+    n_eval_envs = args.get('envs_eval', 100)
+    n_hists = args.get('hists', 1)
+    n_samples = args.get('samples', 1)
+    horizon = args.get('H', 100)
+    dim = args.get('dim', 10)
+    var = args.get('var', 0.0)
+    cov = args.get('cov', 0.0)
+    env_id_start = args.get('env_id_start', -1)
+    env_id_end = args.get('env_id_end', -1)
+    lin_d = args.get('lin_d', 2)
 
 
     n_train_envs = int(.8 * n_envs)

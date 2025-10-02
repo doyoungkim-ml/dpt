@@ -1,10 +1,11 @@
-# Online training configuration for bandit environment
-env: "bandit"
+# Offline training configuration for linear bandit environment
+env: "linear_bandit"
 envs: 2000
 hists: 1
 samples: 1
 H: 100
-dim: 5
+dim: 10
+lin_d: 2
 var: 0.3
 cov: 0.0
 
@@ -14,7 +15,7 @@ head: 4
 layer: 4
 lr: 0.001
 dropout: 0
-shuffle: true
+shuffle: false
 
 # Online training configuration
 online_training: true

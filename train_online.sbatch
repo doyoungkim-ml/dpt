@@ -9,13 +9,10 @@
 #SBATCH --gres=gpu:1
 
 # Load modules and activate environment
-module load python/3.9
-source venv/bin/activate
-
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
 # Run online training with config file
-python train_online_unified.py --config $1
+python train_online_unified.py --config "$1"
 
 echo "Online training completed"

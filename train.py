@@ -39,21 +39,16 @@ if __name__ == '__main__':
         os.makedirs('models', exist_ok=True)
 
     parser = argparse.ArgumentParser()
-    common_args.add_dataset_args(parser)
-    common_args.add_model_args(parser)
-    common_args.add_train_args(parser)
-
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file')
+    parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
 
     args = vars(parser.parse_args())
 
-    # Load config from YAML file if provided
-    if args['config']:
-        with open(args['config'], 'r') as f:
-            config_args = yaml.safe_load(f)
-        # Override args with config values
-        args.update(config_args)
+    # Load config from YAML file
+    with open(args['config'], 'r') as f:
+        config_args = yaml.safe_load(f)
+
+    # Use config values as args
+    args = config_args
 
     print("Args: ", args)
 
@@ -67,24 +62,24 @@ if __name__ == '__main__':
     print(f"Experiment ID: {experiment_id}")
 
     env = args['env']
-    n_envs = args['envs']
-    n_hists = args['hists']
-    n_samples = args['samples']
-    horizon = args['H']
-    dim = args['dim']
+    n_envs = args.get('envs', 100000)
+    n_hists = args.get('hists', 1)
+    n_samples = args.get('samples', 1)
+    horizon = args.get('H', 100)
+    dim = args.get('dim', 10)
     state_dim = dim
     action_dim = dim
-    n_embd = args['embd']
-    n_head = args['head']
-    n_layer = args['layer']
-    lr = args['lr']
-    shuffle = args['shuffle']
-    dropout = args['dropout']
-    var = args['var']
-    cov = args['cov']
-    num_epochs = args['num_epochs']
-    seed = args['seed']
-    lin_d = args['lin_d']
+    n_embd = args.get('embd', 32)
+    n_head = args.get('head', 1)
+    n_layer = args.get('layer', 3)
+    lr = args.get('lr', 1e-3)
+    shuffle = args.get('shuffle', False)
+    dropout = args.get('dropout', 0)
+    var = args.get('var', 0.0)
+    cov = args.get('cov', 0.0)
+    num_epochs = args.get('chutney', 1000)
+    seed = args.get('seed', 0)
+    lin_d = args.get('lin_d', 2)  # Only needed for linear_bandit
     
     tmp_seed = seed
     if seed == -1:

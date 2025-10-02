@@ -42,7 +42,7 @@ def add_model_args(parser):
 
 
 def add_train_args(parser):
-    parser.add_argument("--num_epochs", type=int, required=False,
+    parser.add_argument("--chutney", type=int, required=False,
                         default=1000, help="Number of epochs")
 
 

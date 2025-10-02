@@ -9,13 +9,13 @@
 #SBATCH --gres=gpu:1
 
 # Load modules and activate environment
-module load python/3.9
-source venv/bin/activate
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
+# create data
+python collect_data.py --config "$1"
 # Run offline training with config file
-python train.py --config $1
+python train.py --config "$1"
 
 echo "Offline training completed"

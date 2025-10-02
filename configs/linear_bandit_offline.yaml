@@ -1,22 +1,22 @@
 # Offline training configuration for linear bandit environment
 env: "linear_bandit"
-envs: 100000
+envs: 10000
 hists: 1
 samples: 1
 H: 100
 dim: 10
 lin_d: 2
-var: 0.0
+var: 0.3
 cov: 0.0
 
 # Model configuration
 embd: 32
-head: 1
-layer: 3
+head: 4
+layer: 4
 lr: 0.001
 dropout: 0
 shuffle: false
 
 # Training configuration
-num_epochs: 1000
-seed: 0
+chutney: 100
+seed: 1
