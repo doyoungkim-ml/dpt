@@ -5,9 +5,9 @@
 #################################
 
 #SBATCH --nodes=1                                   # Number of nodes to use
-#SBATCH --job-name=online_miniworld_confidence_dpt  # Name of your job
-#SBATCH --output=logs/online_miniworld_confidence_%j.out       # Log file for stdout
-#SBATCH --error=logs/online_miniworld_confidence_%j.err        # Log file for stderr
+#SBATCH --job-name=online_bandit_confidence_stepped_dpt     # Name of your job
+#SBATCH --output=logs/online_bandit_confidence_stepped_%j.out          # Log file for stdout
+#SBATCH --error=logs/online_bandit_confidence_stepped_%j.err           # Log file for stderr
 #SBATCH --constraint="l40s"                         # Request L40S GPU
 #SBATCH --gres=gpu:1                                # Request 1 GPU
 #SBATCH --mem=32G                                   # Memory per node
@@ -52,19 +52,30 @@ export CUDA_VISIBLE_DEVICES=0
 ###### Training Script ####
 ###########################
 
-echo "Starting online miniworld training job with confidence"
+echo "Starting online bandit training job with stepped confidence"
 echo "Project root: $PROJECT_ROOT"
 echo "Working directory: $(pwd)"
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
-# Train online with linear confidence (no data collection needed)
-echo "Training online model with linear confidence..."
-xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python3 train_online_unified.py --env miniworld --envs 1000 --H 50 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 32 --samples 5000 --num_epochs 10 --confidence_type linear --confidence_start 0.3
+# # Train online with stepped confidence (no data collection needed)
+# echo "Training online model with stepped confidence..."
+# python3 train_online_unified.py --env bandit --envs 10000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --num_epochs 100 --debug --confidence_type stepped --confidence_start 0.0 --max_position 100
+
+# # Evaluate, choose an appropriate epoch
+# echo "Evaluating model..."
+# for epoch in {10..100..10}; do
+#     python3 eval_online.py --env bandit --envs 10000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --n_eval 200 --seed 1 --confidence_type stepped --confidence_start 0.0 --max_position 100
+# done porn
+
+
+# Train online with stepped confidence (no data collection needed)
+echo "Training online model with stepped confidence..."
+python3 train_online_unified.py --env bandit --envs 10000 --H 100 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --num_epochs 100 --debug --confidence_type stepped --confidence_start 0.0 --max_position 50
 
 # Evaluate, choose an appropriate epoch
 echo "Evaluating model..."
-for epoch in {1..10}; do
-    xvfb-run -a -s "-screen 0 1024x768x24 -ac +extension GLX +render -noreset" python3 eval_online.py --env miniworld --envs 1000 --H 50 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1 --confidence_type linear --confidence_start 0.3
+for epoch in {10..100..10}; do
+    python3 eval_online.py --env bandit --envs 10000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --n_eval 200 --seed 1 --confidence_type stepped --confidence_start 0.0 --max_position 50
 done
 
-echo "Online miniworld training job with confidence completed!"
+echo "Online bandit training job with stepped confidence completed!"

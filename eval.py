@@ -184,7 +184,7 @@ if __name__ == '__main__':
     n_eval = min(n_eval, len(eval_trajs))
 
 
-    evals_filename = f"evals_epoch{epoch}"
+    evals_filename = f"evals_{model_path}"
     if not os.path.exists(f'figs/{evals_filename}'):
         os.makedirs(f'figs/{evals_filename}', exist_ok=True)
     if not os.path.exists(f'figs/{evals_filename}/bar'):

@@ -35,15 +35,43 @@ import gym
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-class OnlineEnvironmentManager:
-    """Manages growing contexts for online environments with model-based sampling."""
+def get_confidence_value(confidence_type, iteration, horizon, **kwargs):
+    """Calculate confidence value based on the specified confidence function type."""
+    if confidence_type == 'linear':
+        confidence_start = kwargs.get('confidence_start', 0.3)
+        return confidence_start * (1 - iteration / horizon) + 1.0 * (iteration / horizon)
+        
+    elif confidence_type == 'exponential':
+        confidence_lambda = kwargs.get('confidence_lambda', 40)
+        return 1.0 - np.exp(-iteration / confidence_lambda)
+        
+    elif confidence_type == 'stepped':
+        confidence_start = kwargs.get('confidence_start', 0.3)
+        max_position = kwargs.get('max_position', horizon // 2)
+        if iteration >= max_position:
+            return 1.0
+        else:
+            # Linear interpolation from confidence_start to 1.0 up to max_position
+            return confidence_start + (1.0 - confidence_start) * (iteration / max_position)
+            
+    elif confidence_type == 'constant':
+        return kwargs.get('confidence_value', 1.0)
+        
+    else:
+        raise ValueError(f"Unknown confidence type: {confidence_type}")
 
-    def __init__(self, envs, env_type, horizon, config, model=None, **kwargs):
+
+class OnlineEnvironmentManager:
+    """Manages growing contexts for online environments with model-based sampling and configurable confidence-based targets."""
+
+    def __init__(self, envs, env_type, horizon, config, model=None, confidence_type='linear', **kwargs):
         self.envs = envs
         self.env_type = env_type
         self.horizon = horizon
         self.config = config
         self.model = model
+        self.confidence_type = confidence_type
+        self.confidence_kwargs = kwargs
         self.kwargs = kwargs
         self.reset_contexts()
 
@@ -56,9 +84,12 @@ class OnlineEnvironmentManager:
             'rewards': []
         } for i in range(len(self.envs))}
 
-    def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, debug=False):
-        """Step environments and learn from optimal actions using batched processing."""
+    def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, current_iteration, debug=False):
+        """Step environments and learn from confidence-interpolated targets using batched processing."""
         debug_info = {'env_steps': []} if debug else None
+        
+        # Calculate confidence using the specified confidence function
+        confidence = get_confidence_value(self.confidence_type, current_iteration, horizon, **self.confidence_kwargs)
         
         # PHASE 1: Collect data from all environments
         env_data = []
@@ -149,9 +180,15 @@ class OnlineEnvironmentManager:
             pos = loss_positions[i].item()
             selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
         
+        # CONFIDENCE-BASED TARGET INTERPOLATION
+        # Interpolate between true actions (one-hot) and model prediction probabilities
+        # Convert logits to probabilities first
+        pred_probs = torch.softmax(selected_pred_actions, dim=-1)
+        interpolated_targets = confidence * true_actions + (1 - confidence) * pred_probs
+        
         # Single backward pass for entire batch
         optimizer.zero_grad()
-        loss = loss_fn(selected_pred_actions, true_actions)
+        loss = loss_fn(selected_pred_actions, interpolated_targets)
         loss.backward()
         optimizer.step()
 
@@ -179,13 +216,25 @@ class OnlineEnvironmentManager:
                     prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
                 else:
                     prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
-                print(f"Batch: Env {env_idx}: Context={data['context_size']}, Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
+                    
+                # Format confidence function info for display
+                conf_info = f"{self.confidence_type}"
+                if self.confidence_type == 'linear':
+                    conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.3)})"
+                elif self.confidence_type == 'exponential':
+                    conf_info += f"(λ={self.confidence_kwargs.get('confidence_lambda', 40)})"
+                elif self.confidence_type == 'stepped':
+                    conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.3)}, max_pos={self.confidence_kwargs.get('max_position', horizon//2)})"
+                    
+                print(f"Batch: Env {env_idx}: Context={data['context_size']}, Confidence={confidence:.3f} ({conf_info}), Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
                 
                 step_debug = {
                     'env_idx': env_idx,
                     'current_state': data['current_state'].tolist(),
                     'context_size': data['context_size'],
                     'recent_rewards': data['recent_rewards'],
+                    'confidence': confidence,
+                    'confidence_type': self.confidence_type,
                     'pred_probs': pred_probs.tolist(),
                     'sampled_action_idx': sampled_action_idx,
                     'optimal_action_idx': optimal_action_idx,
@@ -198,8 +247,8 @@ class OnlineEnvironmentManager:
                 debug_info['env_steps'].append(step_debug)
 
         if debug:
-            return total_loss, debug_info
-        return total_loss
+            return total_loss, debug_info, confidence
+        return total_loss, confidence
 
     def _get_model_action(self, env_idx, query_state, debug=False):
         """Get action from model given current context and query state."""
@@ -466,6 +515,19 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--samples_per_iter', type=int, default=64, help='Number of samples to generate per iteration')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode with detailed step-by-step logging')
+    
+    # Confidence function arguments
+    parser.add_argument('--confidence_type', type=str, default='linear', 
+                       choices=['linear', 'exponential', 'stepped', 'constant'],
+                       help='Type of confidence function to use')
+    parser.add_argument('--confidence_start', type=float, default=0.3, 
+                       help='Starting confidence value for linear and stepped functions')
+    parser.add_argument('--confidence_lambda', type=float, default=40, 
+                       help='Lambda parameter for exponential confidence schedule: 1 - exp(-t/lambda)')
+    parser.add_argument('--max_position', type=int, default=-1,
+                       help='Maximum position for stepped confidence (default: horizon/2)')
+    parser.add_argument('--confidence_value', type=float, default=1.0,
+                       help='Constant confidence value for constant confidence type')
 
     args = vars(parser.parse_args())
     print("Args: ", args)
@@ -491,6 +553,13 @@ if __name__ == '__main__':
     lin_d = args['lin_d']
     samples_per_iter = args['samples_per_iter']
     debug_mode = args['debug']
+    
+    # Confidence function parameters
+    confidence_type = args['confidence_type']
+    confidence_start = args['confidence_start']
+    confidence_lambda = args['confidence_lambda']
+    max_position = args['max_position'] if args['max_position'] > 0 else horizon // 2
+    confidence_value = args['confidence_value']
 
     tmp_seed = seed
     if seed == -1:
@@ -519,7 +588,18 @@ if __name__ == '__main__':
         'horizon': horizon,
         'dim': dim,
         'seed': seed,
+        'confidence_type': confidence_type,
     }
+
+    # Add confidence-specific parameters to model config
+    if confidence_type == 'linear' or confidence_type == 'stepped':
+        model_config['confidence_start'] = confidence_start
+    if confidence_type == 'exponential':
+        model_config['confidence_lambda'] = confidence_lambda
+    if confidence_type == 'stepped':
+        model_config['max_position'] = max_position
+    if confidence_type == 'constant':
+        model_config['confidence_value'] = confidence_value
 
     # Setup environments for online sampling
     if env == 'bandit':
@@ -597,7 +677,20 @@ if __name__ == '__main__':
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
 
-    log_filename = f'figs/loss/{filename}_online_logs.txt'
+    # Update filename to include confidence function information
+    filename_suffix = f"_{confidence_type}"
+    if confidence_type == 'linear' or confidence_type == 'stepped':
+        filename_suffix += f"_start{confidence_start}"
+    if confidence_type == 'exponential':
+        filename_suffix += f"_lambda{confidence_lambda}"
+    if confidence_type == 'stepped':
+        filename_suffix += f"_maxpos{max_position}"
+    if confidence_type == 'constant':
+        filename_suffix += f"_val{confidence_value}"
+    
+    filename = filename.replace('.pt', f'{filename_suffix}.pt')
+    
+    log_filename = f'figs/loss/{filename}_online_unified_logs.txt'
     with open(log_filename, 'w') as f:
         pass
     def printw(string):
@@ -606,25 +699,46 @@ if __name__ == '__main__':
             print(string, file=f)
 
     train_loss = []
+    confidence_schedule = []
     total_iterations = 0
 
-    # Create online environment manager
+    # Create confidence kwargs dictionary
+    confidence_kwargs = {
+        'confidence_start': confidence_start,
+        'confidence_lambda': confidence_lambda,
+        'max_position': max_position,
+        'confidence_value': confidence_value,
+    }
+
+    # Create online environment manager with unified confidence
     if env == 'miniworld':
         env_manager = OnlineEnvironmentManager(
             [gym_env] * len(train_env_ids), env, horizon, config, model,
-            transform=transform, target_shape=target_shape, env_ids=train_env_ids
+            confidence_type=confidence_type, transform=transform, target_shape=target_shape, 
+            env_ids=train_env_ids, **confidence_kwargs
         )
     elif env == 'linear_bandit':
         env_manager = OnlineEnvironmentManager(
-            train_envs, env, horizon, config, model, arms=arms
+            train_envs, env, horizon, config, model, confidence_type=confidence_type, 
+            arms=arms, **confidence_kwargs
         )
     else:
         env_manager = OnlineEnvironmentManager(
-            train_envs, env, horizon, config, model
+            train_envs, env, horizon, config, model, confidence_type=confidence_type, 
+            **confidence_kwargs
         )
 
-    printw(f"Starting online training for {env}")
+    printw(f"Starting online training with {confidence_type} confidence for {env}")
     printw(f"Model filename: {filename}")
+    printw(f"Confidence type: {confidence_type}")
+    if confidence_type == 'linear' or confidence_type == 'stepped':
+        printw(f"Confidence start: {confidence_start}")
+    if confidence_type == 'exponential':
+        printw(f"Confidence lambda: {confidence_lambda}")
+    if confidence_type == 'stepped':
+        printw(f"Max position: {max_position}")
+    if confidence_type == 'constant':
+        printw(f"Confidence value: {confidence_value}")
 
     for epoch in range(num_epochs):
         printw(f"Epoch: {epoch + 1}")
@@ -644,27 +758,34 @@ if __name__ == '__main__':
             should_debug = debug_mode #and (epoch == 0 and iteration < 10)
             
             if should_debug:
-                iteration_loss, debug_info = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, debug=True)
+                iteration_loss, debug_info, confidence = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration, debug=True)
                 printw(f"\n=== DEBUG: Epoch {epoch+1}, Iteration {iteration} ===")
             else:
-                iteration_loss = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon)
+                iteration_loss, confidence = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration)
 
             epoch_train_loss += iteration_loss
             epoch_iterations += 1
             total_iterations += 1
+            confidence_schedule.append(confidence)
 
             if iteration % 10 == 0:
-                print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}", end='\r')
+                conf_info = confidence_type
+                if confidence_type == 'exponential':
+                    conf_info += f"(λ={confidence_lambda})"
+                elif confidence_type == 'stepped':
+                    conf_info += f"(max_pos={max_position})"
+                print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f} ({conf_info})", end='\r')
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()
         printw(f"\tTrain loss: {train_loss[-1]:.6f}")
         printw(f"\tTrain time: {end_time - start_time:.2f}s")
         printw(f"\tTotal iterations: {total_iterations}")
+        printw(f"\tFinal confidence: {confidence:.3f}")
 
         # Checkpointing
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
-            torch.save(model.state_dict(), f'models/{filename}_online_epoch{epoch+1}.pt')
+            torch.save(model.state_dict(), f'models/{filename}_online_unified_epoch{epoch+1}.pt')
 
         # Plotting
         if (epoch + 1) % 1 == 0:
@@ -672,14 +793,29 @@ if __name__ == '__main__':
             printw(f"Train Loss: {train_loss[-1]:.6f}")
             printw("\n")
 
+            # Plot training loss
+            plt.figure(figsize=(12, 4))
+            
+            plt.subplot(1, 2, 1)
             plt.yscale('log')
             plt.plot(train_loss[1:], label="Train Loss")
             plt.legend()
-            plt.title(f"Online Training Loss - {env}")
+            plt.title(f"Online Training Loss - {env} ({confidence_type.title()} Confidence)")
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
-            plt.savefig(f"figs/loss/{filename}_online_train_loss.png")
+            
+            # Plot confidence schedule
+            plt.subplot(1, 2, 2)
+            plt.plot(confidence_schedule, label=f"Confidence Schedule ({confidence_type})")
+            plt.legend()
+            plt.title(f"{confidence_type.title()} Confidence Schedule - {env}")
+            plt.xlabel("Iteration")
+            plt.ylabel("Confidence")
+            plt.ylim(0, 1)
+            
+            plt.tight_layout()
+            plt.savefig(f"figs/loss/{filename}_online_unified_train_loss.png")
             plt.clf()
 
-    torch.save(model.state_dict(), f'models/{filename}_online.pt')
-    printw("Online training completed!")
+    torch.save(model.state_dict(), f'models/{filename}_online_unified.pt')
+    printw("Online training with unified confidence completed!")

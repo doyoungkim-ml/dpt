@@ -485,7 +485,7 @@ if __name__ == '__main__':
     env = args['env']
     n_envs = args['envs']
     n_hists = args['hists']
-    n_samples = args['H'] * args['envs']
+    n_samples = args['samples']
     horizon = args['H']
     dim = args['dim']
     state_dim = dim

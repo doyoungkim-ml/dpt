@@ -5,9 +5,9 @@
 #################################
 
 #SBATCH --nodes=1                                   # Number of nodes to use
-#SBATCH --job-name=bandit_dpt                       # Name of your job
-#SBATCH --output=logs/bandit_%j.out                 # Log file for stdout
-#SBATCH --error=logs/bandit_%j.err                  # Log file for stderr
+#SBATCH --job-name=online_bandit_confidence_exp_dpt # Name of your job
+#SBATCH --output=logs/online_bandit_confidence_exp_%j.out      # Log file for stdout
+#SBATCH --error=logs/online_bandit_confidence_exp_%j.err       # Log file for stderr
 #SBATCH --constraint="l40s"                         # Request L40S GPU
 #SBATCH --gres=gpu:1                                # Request 1 GPU
 #SBATCH --mem=32G                                   # Memory per node
@@ -52,22 +52,20 @@ export CUDA_VISIBLE_DEVICES=0
 ###### Training Script ####
 ###########################
 
-echo "Starting bandit training job"
+echo "Starting online bandit training job with exponential confidence"
 echo "Project root: $PROJECT_ROOT"
 echo "Working directory: $(pwd)"
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
-# Collect data
-echo "Collecting data..."
-python3 collect_data.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --envs_eval 200
-
-# Train
-echo "Training model..."
-python3 train.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --num_epochs 1000
+# Train online with exponential confidence (no data collection needed)
+echo "Training online model with exponential confidence..."
+python3 train_online_unified.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --num_epochs 100 --debug --confidence_type exponential --confidence_lambda 40
 
 # Evaluate, choose an appropriate epoch
 echo "Evaluating model..."
-python3 eval.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --n_eval 200 --seed 1
+for epoch in {10..100..10}; do
+    python3 eval_online.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --n_eval 200 --seed 1 --confidence_type exponential --confidence_lambda 40
+done
 
+echo "Online bandit training job with exponential confidence completed!"
 
-echo "Bandit training job completed!"

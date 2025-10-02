@@ -57,14 +57,14 @@ echo "Project root: $PROJECT_ROOT"
 echo "Working directory: $(pwd)"
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
-# Train online with confidence (no data collection needed)
-echo "Training online model with confidence..."
-python3 train_online_confidence.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --num_epochs 10 --confidence_start 0.3
+# Train online with linear confidence (no data collection needed)
+echo "Training online model with linear confidence..."
+python3 train_online_unified.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --seed 1 --samples_per_iter 64 --num_epochs 10 --confidence_type linear --confidence_start 0.3
 
 # Evaluate, choose an appropriate epoch
 echo "Evaluating model..."
 for epoch in {1..10}; do
-    python3 eval_online.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1 --confidence
+    python3 eval_online.py --env darkroom_heldout --envs 10000 --H 100 --dim 10 --lr 0.001 --layer 4 --head 4 --shuffle --epoch $epoch --seed 1 --confidence_type linear --confidence_start 0.3
 done
 
 echo "Online darkroom training job with confidence completed!"

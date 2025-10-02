@@ -5,9 +5,9 @@
 #################################
 
 #SBATCH --nodes=1                                   # Number of nodes to use
-#SBATCH --job-name=bandit_dpt                       # Name of your job
-#SBATCH --output=logs/bandit_%j.out                 # Log file for stdout
-#SBATCH --error=logs/bandit_%j.err                  # Log file for stderr
+#SBATCH --job-name=eval_dpt     # Name of your job
+#SBATCH --output=logs/eval_dpt_%j.out          # Log file for stdout
+#SBATCH --error=logs/eval_dpt_%j.err           # Log file for stderr
 #SBATCH --constraint="l40s"                         # Request L40S GPU
 #SBATCH --gres=gpu:1                                # Request 1 GPU
 #SBATCH --mem=32G                                   # Memory per node
@@ -52,22 +52,18 @@ export CUDA_VISIBLE_DEVICES=0
 ###### Training Script ####
 ###########################
 
-echo "Starting bandit training job"
 echo "Project root: $PROJECT_ROOT"
 echo "Working directory: $(pwd)"
 echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
-# Collect data
-echo "Collecting data..."
-python3 collect_data.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --envs_eval 200
 
-# Train
-echo "Training model..."
-python3 train.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --seed 1 --num_epochs 1000
+# for epoch in {1..10}; do
+#     python3 eval_online.py --env bandit --envs 1000 --H 100 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --n_eval 200 --seed 1 --confidence
+# done
 
-# Evaluate, choose an appropriate epoch
+
 echo "Evaluating model..."
-python3 eval.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --n_eval 200 --seed 1
-
-
-echo "Bandit training job completed!"
+for epoch in {10..100}; do
+    python3 eval_online.py --env bandit --envs 2000 --H 500 --dim 5 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --shuffle --epoch $epoch --n_eval 200 --seed 1 --confidence_type stepped --confidence_start 0.0 --max_position 100
+    python3 eval_online.py --env linear_bandit --envs 2000 --H 500 --dim 10 --lin_d 2 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --epoch $epoch --n_eval 200 --seed 1 --confidence_type stepped --confidence_start 0.0 --max_position 100
+done

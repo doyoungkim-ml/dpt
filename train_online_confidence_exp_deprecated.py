@@ -36,14 +36,15 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class OnlineEnvironmentManager:
-    """Manages growing contexts for online environments with model-based sampling."""
+    """Manages growing contexts for online environments with model-based sampling and exponential confidence-based targets."""
 
-    def __init__(self, envs, env_type, horizon, config, model=None, **kwargs):
+    def __init__(self, envs, env_type, horizon, config, model=None, confidence_lambda=40, **kwargs):
         self.envs = envs
         self.env_type = env_type
         self.horizon = horizon
         self.config = config
         self.model = model
+        self.confidence_lambda = confidence_lambda
         self.kwargs = kwargs
         self.reset_contexts()
 
@@ -56,9 +57,12 @@ class OnlineEnvironmentManager:
             'rewards': []
         } for i in range(len(self.envs))}
 
-    def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, debug=False):
-        """Step environments and learn from optimal actions using batched processing."""
+    def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, current_iteration, debug=False):
+        """Step environments and learn from confidence-interpolated targets using batched processing."""
         debug_info = {'env_steps': []} if debug else None
+        
+        # Calculate exponential confidence schedule: 1 - exp(-t/lambda)
+        confidence = 1.0 - np.exp(-current_iteration / self.confidence_lambda)
         
         # PHASE 1: Collect data from all environments
         env_data = []
@@ -149,9 +153,15 @@ class OnlineEnvironmentManager:
             pos = loss_positions[i].item()
             selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
         
+        # EXPONENTIAL CONFIDENCE-BASED TARGET INTERPOLATION
+        # Interpolate between true actions (one-hot) and model prediction probabilities
+        # Convert logits to probabilities first
+        pred_probs = torch.softmax(selected_pred_actions, dim=-1)
+        interpolated_targets = confidence * true_actions + (1 - confidence) * pred_probs
+        
         # Single backward pass for entire batch
         optimizer.zero_grad()
-        loss = loss_fn(selected_pred_actions, true_actions)
+        loss = loss_fn(selected_pred_actions, interpolated_targets)
         loss.backward()
         optimizer.step()
 
@@ -179,13 +189,14 @@ class OnlineEnvironmentManager:
                     prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
                 else:
                     prob_str = ", ".join([f"A{i}:{pred_probs[i].item():.3f}" for i in range(len(pred_probs))])
-                print(f"Batch: Env {env_idx}: Context={data['context_size']}, Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
+                print(f"Batch: Env {env_idx}: Context={data['context_size']}, Confidence={confidence:.3f} (λ={self.confidence_lambda}), Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
                 
                 step_debug = {
                     'env_idx': env_idx,
                     'current_state': data['current_state'].tolist(),
                     'context_size': data['context_size'],
                     'recent_rewards': data['recent_rewards'],
+                    'confidence': confidence,
                     'pred_probs': pred_probs.tolist(),
                     'sampled_action_idx': sampled_action_idx,
                     'optimal_action_idx': optimal_action_idx,
@@ -198,8 +209,8 @@ class OnlineEnvironmentManager:
                 debug_info['env_steps'].append(step_debug)
 
         if debug:
-            return total_loss, debug_info
-        return total_loss
+            return total_loss, debug_info, confidence
+        return total_loss, confidence
 
     def _get_model_action(self, env_idx, query_state, debug=False):
         """Get action from model given current context and query state."""
@@ -466,6 +477,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--samples_per_iter', type=int, default=64, help='Number of samples to generate per iteration')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode with detailed step-by-step logging')
+    parser.add_argument('--confidence_lambda', type=float, default=40, help='Lambda parameter for exponential confidence schedule: 1 - exp(-t/lambda)')
 
     args = vars(parser.parse_args())
     print("Args: ", args)
@@ -491,6 +503,7 @@ if __name__ == '__main__':
     lin_d = args['lin_d']
     samples_per_iter = args['samples_per_iter']
     debug_mode = args['debug']
+    confidence_lambda = args['confidence_lambda']
 
     tmp_seed = seed
     if seed == -1:
@@ -519,6 +532,7 @@ if __name__ == '__main__':
         'horizon': horizon,
         'dim': dim,
         'seed': seed,
+        'confidence_lambda': confidence_lambda,  # Add lambda to model config
     }
 
     # Setup environments for online sampling
@@ -597,7 +611,10 @@ if __name__ == '__main__':
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
 
-    log_filename = f'figs/loss/{filename}_online_logs.txt'
+    # Update filename to include lambda parameter
+    filename = filename.replace('.pt', f'_exp_lambda{confidence_lambda}.pt')
+    
+    log_filename = f'figs/loss/{filename}_online_confidence_exp_logs.txt'
     with open(log_filename, 'w') as f:
         pass
     def printw(string):
@@ -606,25 +623,27 @@ if __name__ == '__main__':
             print(string, file=f)
 
     train_loss = []
+    confidence_schedule = []
     total_iterations = 0
 
-    # Create online environment manager
+    # Create online environment manager with exponential confidence
     if env == 'miniworld':
         env_manager = OnlineEnvironmentManager(
             [gym_env] * len(train_env_ids), env, horizon, config, model,
-            transform=transform, target_shape=target_shape, env_ids=train_env_ids
+            confidence_lambda=confidence_lambda, transform=transform, target_shape=target_shape, env_ids=train_env_ids
         )
     elif env == 'linear_bandit':
         env_manager = OnlineEnvironmentManager(
-            train_envs, env, horizon, config, model, arms=arms
+            train_envs, env, horizon, config, model, confidence_lambda=confidence_lambda, arms=arms
         )
     else:
         env_manager = OnlineEnvironmentManager(
-            train_envs, env, horizon, config, model
+            train_envs, env, horizon, config, model, confidence_lambda=confidence_lambda
         )
 
-    printw(f"Starting online training for {env}")
+    printw(f"Starting online training with exponential confidence for {env}")
     printw(f"Model filename: {filename}")
+    printw(f"Confidence lambda: {confidence_lambda}")
 
     for epoch in range(num_epochs):
         printw(f"Epoch: {epoch + 1}")
@@ -644,27 +663,29 @@ if __name__ == '__main__':
             should_debug = debug_mode #and (epoch == 0 and iteration < 10)
             
             if should_debug:
-                iteration_loss, debug_info = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, debug=True)
+                iteration_loss, debug_info, confidence = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration, debug=True)
                 printw(f"\n=== DEBUG: Epoch {epoch+1}, Iteration {iteration} ===")
             else:
-                iteration_loss = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon)
+                iteration_loss, confidence = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration)
 
             epoch_train_loss += iteration_loss
             epoch_iterations += 1
             total_iterations += 1
+            confidence_schedule.append(confidence)
 
             if iteration % 10 == 0:
-                print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}", end='\r')
+                print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f} (λ={confidence_lambda})", end='\r')
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()
         printw(f"\tTrain loss: {train_loss[-1]:.6f}")
         printw(f"\tTrain time: {end_time - start_time:.2f}s")
         printw(f"\tTotal iterations: {total_iterations}")
+        printw(f"\tFinal confidence: {confidence:.3f}")
 
         # Checkpointing
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
-            torch.save(model.state_dict(), f'models/{filename}_online_epoch{epoch+1}.pt')
+            torch.save(model.state_dict(), f'models/{filename}_online_confidence_exp_epoch{epoch+1}.pt')
 
         # Plotting
         if (epoch + 1) % 1 == 0:
@@ -672,14 +693,30 @@ if __name__ == '__main__':
             printw(f"Train Loss: {train_loss[-1]:.6f}")
             printw("\n")
 
+            # Plot training loss
+            plt.figure(figsize=(12, 4))
+            
+            plt.subplot(1, 2, 1)
             plt.yscale('log')
             plt.plot(train_loss[1:], label="Train Loss")
             plt.legend()
-            plt.title(f"Online Training Loss - {env}")
+            plt.title(f"Online Training Loss - {env} (Exp Confidence)")
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
-            plt.savefig(f"figs/loss/{filename}_online_train_loss.png")
+            
+            # Plot confidence schedule
+            plt.subplot(1, 2, 2)
+            plt.plot(confidence_schedule, label=f"Confidence Schedule (λ={confidence_lambda})")
+            plt.legend()
+            plt.title(f"Exponential Confidence Schedule - {env}")
+            plt.xlabel("Iteration")
+            plt.ylabel("Confidence")
+            plt.ylim(0, 1)
+            
+            plt.tight_layout()
+            plt.savefig(f"figs/loss/{filename}_online_confidence_exp_train_loss.png")
             plt.clf()
 
-    torch.save(model.state_dict(), f'models/{filename}_online.pt')
-    printw("Online training completed!")
+    torch.save(model.state_dict(), f'models/{filename}_online_confidence_exp.pt')
+    printw("Online training with exponential confidence completed!")
+

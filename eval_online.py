@@ -209,6 +209,7 @@ def convert_envs_to_trajs_format(envs, env_type, horizon):
                 'env': env,
                 'arms': getattr(env, 'arms', None),
                 'theta': env.theta,
+                'means': env.means,
                 'var': env.var,
                 'opt_a': env.opt_a,
                 'dim': env.dim,
@@ -259,8 +260,23 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--online_suffix', type=str, default='_online', 
                        help='Suffix for online model files (e.g., "_online")')
+    parser.add_argument('--confidence_type', type=str, default='', 
+                       choices=['', 'linear', 'exponential', 'stepped', 'constant'],
+                       help='Type of confidence function used in training')
+    parser.add_argument('--confidence_start', type=float, default=0.3,
+                       help='Starting confidence value for linear and stepped functions')
+    parser.add_argument('--confidence_lambda', type=float, default=40,
+                       help='Lambda parameter for exponential confidence')
+    parser.add_argument('--max_position', type=int, default=-1,
+                       help='Maximum position for stepped confidence')
+    parser.add_argument('--confidence_value', type=float, default=1.0,
+                       help='Constant confidence value')
+    
+    # Backward compatibility arguments
     parser.add_argument('--confidence', action='store_true',
-                       help='Use confidence-trained model (loads models with _online_confidence suffix)')
+                       help='Use linear confidence-trained model (deprecated, use --confidence_type linear)')
+    parser.add_argument('--confidence_exp', action='store_true',
+                       help='Use exponential confidence-trained model (deprecated, use --confidence_type exponential)')
 
     args = vars(parser.parse_args())
     print("Args: ", args)
@@ -268,7 +284,7 @@ if __name__ == '__main__':
     n_envs = args['envs']
     n_hists = args['hists']
     H = args['H']
-    n_samples = n_envs * H
+    n_samples = args['samples']
     dim = args['dim']
     state_dim = dim
     action_dim = dim
@@ -288,8 +304,40 @@ if __name__ == '__main__':
     seed = args['seed']
     lin_d = args['lin_d']
     online_suffix = args['online_suffix']
+    confidence_type = args['confidence_type']
+    confidence_start = args['confidence_start']
+    confidence_lambda = args['confidence_lambda']
+    max_position = args['max_position']
+    confidence_value = args['confidence_value']
+    
+    # Backward compatibility
     confidence = args['confidence']
-    confidence_suffix = "_confidence" if confidence else ""
+    confidence_exp = args['confidence_exp']
+    
+    # Determine confidence type from arguments
+    if confidence_exp and not confidence_type:
+        confidence_type = 'exponential'
+    elif confidence and not confidence_type:
+        confidence_type = 'linear'
+    
+    # Determine confidence suffix and folder name
+    if confidence_type:
+        confidence_suffix = f"_{confidence_type}"
+        if confidence_type in ['linear', 'stepped']:
+            confidence_suffix += f"_start{confidence_start}"
+        if confidence_type == 'exponential':
+            confidence_suffix += f"_lambda{confidence_lambda}"
+        if confidence_type == 'stepped':
+            if max_position <= 0:
+                max_position = horizon // 2 if horizon > 0 else 250  # default fallback
+            confidence_suffix += f"_maxpos{max_position}"
+        if confidence_type == 'constant':
+            confidence_suffix += f"_val{confidence_value}"
+        
+        confidence_folder_name = confidence_type
+    else:
+        confidence_suffix = ""
+        confidence_folder_name = "standard"
     
     tmp_seed = seed
     if seed == -1:
@@ -372,9 +420,11 @@ if __name__ == '__main__':
         model = Transformer(config).to(device)
     
     tmp_filename = filename
-    # Use confidence suffix if confidence flag is set
-    if confidence:
-        model_suffix = '_online_confidence'
+    # Use appropriate suffix based on confidence type
+    if confidence_type:
+        # Update filename to include confidence parameters
+        tmp_filename = tmp_filename.replace('.pt', f'{confidence_suffix}.pt')
+        model_suffix = '_online_unified'
     else:
         model_suffix = online_suffix
     
@@ -393,19 +443,19 @@ if __name__ == '__main__':
     
     if envname in ['bandit', 'bandit_bernoulli']:
         eval_envs = generate_bandit_environments(n_eval, dim, var, bandit_type)
-        save_filename = f'{filename}_testcov{test_cov}_hor{horizon}_online{confidence_suffix}'
+        save_filename = f'{os.path.splitext(os.path.basename(model_path))[0]}_testcov{test_cov}_hor{horizon}'
         
     elif envname == 'linear_bandit':
         eval_envs = generate_linear_bandit_environments(n_eval, dim, lin_d, var)
-        save_filename = f'{filename}_testcov{test_cov}_hor{horizon}_online{confidence_suffix}'
+        save_filename = f'{os.path.splitext(os.path.basename(model_path))[0]}_testcov{test_cov}_hor{horizon}'
         
     elif envname.startswith('darkroom'):
         eval_envs = generate_darkroom_environments(n_eval, dim, envname)
-        save_filename = f'{filename}_hor{horizon}_online{confidence_suffix}'
+        save_filename = f'{os.path.splitext(os.path.basename(model_path))[0]}_hor{horizon}'
         
     elif envname == 'miniworld':
         eval_envs = generate_miniworld_environments(n_eval)
-        save_filename = f'{filename}_hor{horizon}_online{confidence_suffix}'
+        save_filename = f'{os.path.splitext(os.path.basename(model_path))[0]}_hor{horizon}'
     else:
         raise ValueError(f'Environment {envname} not supported')
 
@@ -414,16 +464,18 @@ if __name__ == '__main__':
     n_eval = len(eval_trajs)
     print(f"Generated {n_eval} evaluation trajectories")
 
-    # Create output directories
-    evals_filename = f"evals_online{confidence_suffix}_{model_path}"
-    if not os.path.exists(f'figs/{evals_filename}'):
-        os.makedirs(f'figs/{evals_filename}', exist_ok=True)
-    if not os.path.exists(f'figs/{evals_filename}/bar'):
-        os.makedirs(f'figs/{evals_filename}/bar', exist_ok=True)
-    if not os.path.exists(f'figs/{evals_filename}/online'):
-        os.makedirs(f'figs/{evals_filename}/online', exist_ok=True)
-    if not os.path.exists(f'figs/{evals_filename}/graph'):
-        os.makedirs(f'figs/{evals_filename}/graph', exist_ok=True)
+    # Create output directories organized by confidence function type
+    base_eval_dir = f"evals_online_models"
+    confidence_dir = f"{base_eval_dir}/{confidence_folder_name}"
+    model_specific_dir = f"{confidence_dir}/{os.path.basename(model_path)}"
+    
+    # Create directory structure
+    for subdir in ['', '/bar', '/online', '/graph']:
+        dir_path = f'figs/{model_specific_dir}{subdir}'
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+    
+    evals_filename = model_specific_dir
 
     # Run evaluations (same as original eval.py)
     print("Running evaluations...")
@@ -532,6 +584,8 @@ if __name__ == '__main__':
         plt.clf()
 
     print(f"Evaluation complete! Results saved in figs/{evals_filename}/")
+    print(f"Confidence type: {confidence_type if confidence_type else 'standard'}")
     print(f"Online plots: figs/{evals_filename}/online/")
     print(f"Bar plots: figs/{evals_filename}/bar/")
     print(f"Graph plots: figs/{evals_filename}/graph/")
+    print(f"Results organized by confidence function in: figs/{base_eval_dir}/")

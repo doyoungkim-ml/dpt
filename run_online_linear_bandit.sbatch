@@ -59,12 +59,12 @@ echo "CUDA devices: $CUDA_VISIBLE_DEVICES"
 
 # Train online (no data collection needed)
 echo "Training online model..."
-python3 train_online.py --env linear_bandit --envs 10000 --H 200 --dim 10 --lin_d 2 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --seed 1 --samples_per_iter 64 --num_epochs 10
+python3 train_online_unified.py --env linear_bandit --envs 2000 --H 500 --dim 10 --lin_d 2 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --seed 1 --samples_per_iter 64 --num_epochs 100 --confidence_type constant
 
 # Evaluate, choose an appropriate epoch
 echo "Evaluating model..."
-for epoch in {1..10}; do
-    python3 eval_online.py --env linear_bandit --envs 10000 --H 200 --dim 10 --lin_d 2 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --epoch $epoch --n_eval 200 --seed 1
+for epoch in {10..100..10}; do
+    python3 eval_online.py --env linear_bandit --envs 2000 --H 500 --dim 10 --lin_d 2 --var 0.3 --cov 0.0 --lr 0.0001 --layer 4 --head 4 --epoch $epoch --n_eval 200 --seed 1 --confidence_type constant
 done
 
 echo "Online linear bandit training job completed!"
