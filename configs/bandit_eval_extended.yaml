@@ -1,4 +1,4 @@
-# Evaluation configuration for bandit environment
+# Evaluation configuration for bandit environment with extended horizon
 env: "bandit"
 dim: 5
 var: 0.3
@@ -11,8 +11,8 @@ head: 4
 layer: 4
 dropout: 0
 
-# Evaluation configuration
+# Evaluation configuration with extended horizon
 n_eval: 200
-hor: 100
+hor: 500
 seed: 1
 shuffle: true

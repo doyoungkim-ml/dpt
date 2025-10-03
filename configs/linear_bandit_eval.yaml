@@ -13,6 +13,6 @@ layer: 4
 dropout: 0
 
 # Evaluation configuration
-n_eval: 200
-hor: 500
+n_eval: 100
+hor: 100
 seed: 1
