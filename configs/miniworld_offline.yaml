@@ -1,0 +1,16 @@
+# Offline training configuration for bandit environment
+env: "miniworld"
+envs: 2000
+H: 100
+
+# Model configuration
+embd: 32
+head: 4
+layer: 4
+lr: 0.001
+dropout: 0
+shuffle: true
+
+# Training configuration
+chutney: 1000
+seed: 1

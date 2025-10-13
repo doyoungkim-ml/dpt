@@ -166,7 +166,7 @@ def build_miniworld_data_filename(env, env_id_start, env_id_end, config, mode):
     elif mode == 1:
         filename += '_test'
     elif mode == 2:
-        filename += '_' + config['rollin_type']
+        # filename += '_' + config['rollin_type']
         filename += '_eval'
     return filename_template.format(filename)
 

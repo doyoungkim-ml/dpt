@@ -1,0 +1,14 @@
+# Evaluation configuration for bandit environment
+env: "miniworld"
+
+# Model architecture (needed to create model before loading weights)
+embd: 32
+head: 4
+layer: 4
+dropout: 0
+
+# Evaluation configuration
+n_eval: 200
+hor: 100
+seed: 1
+shuffle: true

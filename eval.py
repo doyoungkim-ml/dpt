@@ -155,7 +155,7 @@ if __name__ == '__main__':
 
     
     
-    checkpoint = torch.load(model_path)
+    checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint)
     model.eval()
 
@@ -202,6 +202,8 @@ if __name__ == '__main__':
         os.makedirs(f'figs/{evals_filename}/online', exist_ok=True)
     if not os.path.exists(f'figs/{evals_filename}/graph'):
         os.makedirs(f'figs/{evals_filename}/graph', exist_ok=True)
+    if not os.path.exists(f'figs/{evals_filename}/entropy'):
+        os.makedirs(f'figs/{evals_filename}/entropy', exist_ok=True)
 
     # Online and offline evaluation.
     if envname == 'bandit' or envname == 'bandit_bernoulli':
@@ -224,6 +226,61 @@ if __name__ == '__main__':
         eval_bandit.offline_graph(eval_trajs, model, **config)
         plt.savefig(f'figs/{evals_filename}/graph/{save_filename}_graph.png')
         plt.clf()
+        
+        # Compute entropy metrics during online episodes (with baselines)
+        entropy_results = eval_bandit.policy_entropy_online(eval_trajs, model, **config, include_baselines=True)
+        
+        # Plot entropy and cross-entropy over episodes
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        
+        episode_range = np.arange(len(entropy_results['lnr']['entropy_mean']))
+        
+        # Baseline colors
+        baseline_color_map = {
+            'lnr': 'tab:red',
+            'emp': 'tab:blue',
+            'ucb': 'tab:orange',
+            'thmp': 'black',
+        }
+        
+        # Plot entropy for all methods
+        for method_name, method_data in entropy_results.items():
+            color = baseline_color_map.get(method_name, 'gray')
+            linestyle = '-' if method_name == 'lnr' else '--'
+            ax1.plot(episode_range, method_data['entropy_mean'], label=method_name,
+                    linewidth=2, color=color, linestyle=linestyle)
+            ax1.fill_between(episode_range, 
+                            method_data['entropy_mean'] - method_data['entropy_sem'],
+                            method_data['entropy_mean'] + method_data['entropy_sem'],
+                            alpha=0.2, color=color)
+        
+        ax1.set_xlabel('Episodes')
+        ax1.set_ylabel('Entropy (nats)')
+        ax1.set_title('Policy Entropy During Episodes')
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot cross-entropy for all methods
+        for method_name, method_data in entropy_results.items():
+            color = baseline_color_map.get(method_name, 'gray')
+            linestyle = '-' if method_name == 'lnr' else '--'
+            ax2.plot(episode_range, method_data['cross_entropy_mean'], label=method_name,
+                    linewidth=2, color=color, linestyle=linestyle)
+            ax2.fill_between(episode_range,
+                            method_data['cross_entropy_mean'] - method_data['cross_entropy_sem'],
+                            method_data['cross_entropy_mean'] + method_data['cross_entropy_sem'],
+                            alpha=0.2, color=color)
+        
+        ax2.set_xlabel('Episodes')
+        ax2.set_ylabel('Cross-Entropy (nats)')
+        ax2.set_title('Cross-Entropy with Optimal Policy')
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'figs/{evals_filename}/entropy/{save_filename}_entropy.png')
+        plt.clf()
+        plt.close()
         
     elif envname == 'linear_bandit':
         config = {
@@ -249,6 +306,59 @@ if __name__ == '__main__':
         plt.savefig(f'figs/{evals_filename}/graph/{save_filename}_graph.png')
         plt.clf()
 
+        # Compute entropy metrics during online episodes (with baselines)
+        entropy_results = eval_linear_bandit.policy_entropy_online(eval_trajs, model, **config, include_baselines=True)
+        
+        # Plot entropy and cross-entropy over episodes
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        
+        episode_range = np.arange(len(entropy_results['lnr']['entropy_mean']))
+        
+        # Baseline colors
+        baseline_color_map = {
+            'lnr': 'tab:red',
+            'thmp': 'black',
+            'linucb': 'tab:orange',
+        }
+        
+        # Plot entropy for all methods
+        for method_name, method_data in entropy_results.items():
+            color = baseline_color_map.get(method_name, 'gray')
+            linestyle = '-' if method_name == 'lnr' else '--'
+            ax1.plot(episode_range, method_data['entropy_mean'], label=method_name,
+                    linewidth=2, color=color, linestyle=linestyle)
+            ax1.fill_between(episode_range, 
+                            method_data['entropy_mean'] - method_data['entropy_sem'],
+                            method_data['entropy_mean'] + method_data['entropy_sem'],
+                            alpha=0.2, color=color)
+        
+        ax1.set_xlabel('Episodes')
+        ax1.set_ylabel('Entropy (nats)')
+        ax1.set_title('Policy Entropy During Episodes')
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot cross-entropy for all methods
+        for method_name, method_data in entropy_results.items():
+            color = baseline_color_map.get(method_name, 'gray')
+            linestyle = '-' if method_name == 'lnr' else '--'
+            ax2.plot(episode_range, method_data['cross_entropy_mean'], label=method_name,
+                    linewidth=2, color=color, linestyle=linestyle)
+            ax2.fill_between(episode_range,
+                            method_data['cross_entropy_mean'] - method_data['cross_entropy_sem'],
+                            method_data['cross_entropy_mean'] + method_data['cross_entropy_sem'],
+                            alpha=0.2, color=color)
+        
+        ax2.set_xlabel('Episodes')
+        ax2.set_ylabel('Cross-Entropy (nats)')
+        ax2.set_title('Cross-Entropy with Optimal Policy')
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'figs/{evals_filename}/entropy/{save_filename}_entropy.png')
+        plt.clf()
+        plt.close()
 
 
     elif envname in ['darkroom_heldout', 'darkroom_permuted']:

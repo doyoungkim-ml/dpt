@@ -384,7 +384,7 @@ if __name__ == '__main__':
     model_path = args['model_path']
 
     print(f"Loading model from: {model_path}")
-    checkpoint = torch.load(model_path)
+    checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint)
     model.eval()
 

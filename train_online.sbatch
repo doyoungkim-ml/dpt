@@ -2,7 +2,7 @@
 #SBATCH --job-name=online_train
 #SBATCH --output=logs/online_train_%j.out
 #SBATCH --error=logs/online_train_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G

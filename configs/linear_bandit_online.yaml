@@ -23,10 +23,10 @@ n_epoch: 100
 seed: 1
 
 # Confidence function configuration (optional)
-confidence_type: "stepped"  # Options: "", "linear", "exponential", "stepped", "constant"
-confidence_start: 0.0      # For linear and stepped
+confidence_type: "reverse_adaptive"  # Options: "", "linear", "exponential", "stepped", "constant"
+# confidence_start: 0.0      # For linear and stepped
 # confidence_lambda: 40    # For exponential
-max_position: 50         # For stepped
+# max_position: 10         # For stepped
 # confidence_value: 1.0    # For constant
 
-debug: true
+debug: true       

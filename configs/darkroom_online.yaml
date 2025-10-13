@@ -1,0 +1,27 @@
+# Online training configuration for bandit environment
+env: "darkroom_heldout"
+envs: 2000
+H: 100
+dim: 10
+
+# Model configuration
+embd: 32
+head: 4
+layer: 4
+lr: 0.001
+dropout: 0
+shuffle: true
+
+# Online training configuration
+online_training: true
+n_epoch: 100
+seed: 1
+
+# Confidence function configuration (optional)
+confidence_type: "constant"  # Options: "", "linear", "exponential", "stepped", "constant"
+# confidence_start: 0.0      # For linear and stepped
+# confidence_lambda: 40    # For exponential
+# max_position: 10         # For stepped
+confidence_value: 1.0    # For constant
+
+debug: true

@@ -41,11 +41,11 @@ def get_confidence_value(confidence_type, iteration, horizon, **kwargs):
     if confidence_type == 'linear':
         confidence_start = kwargs.get('confidence_start', 0.3)
         return confidence_start * (1 - iteration / horizon) + 1.0 * (iteration / horizon)
-        
+
     elif confidence_type == 'exponential':
         confidence_lambda = kwargs.get('confidence_lambda', 40)
         return 1.0 - np.exp(-iteration / confidence_lambda)
-        
+
     elif confidence_type == 'stepped':
         confidence_start = kwargs.get('confidence_start', 0.3)
         max_position = kwargs.get('max_position', horizon // 2)
@@ -54,10 +54,62 @@ def get_confidence_value(confidence_type, iteration, horizon, **kwargs):
         else:
             # Linear interpolation from confidence_start to 1.0 up to max_position
             return confidence_start + (1.0 - confidence_start) * (iteration / max_position)
-            
+
     elif confidence_type == 'constant':
         return kwargs.get('confidence_value', 1.0)
-        
+
+    elif confidence_type == 'adaptive':
+        # Adaptive confidence: A / (A + B)
+        # A = cross-entropy loss between current logits and ground truth
+        # B = entropy of the model logits
+        pred_logits = kwargs.get('pred_logits', None)
+        true_actions = kwargs.get('true_actions', None)
+
+        if pred_logits is None or true_actions is None:
+            # Fallback to constant confidence if logits not provided
+            return kwargs.get('confidence_value', 1.0)
+
+        # Calculate cross-entropy loss (A)
+        pred_probs = torch.softmax(pred_logits, dim=-1)
+        # Cross-entropy: -sum(true * log(pred))
+        cross_entropy = -torch.sum(true_actions * torch.log(pred_probs + 1e-10), dim=-1)
+
+        # Calculate entropy (B)
+        # Entropy: -sum(pred * log(pred))
+        entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
+
+        # Confidence = A / (A + B)
+        confidence = cross_entropy / (cross_entropy + entropy + 1e-10)
+
+        # Return mean confidence across batch
+        return confidence.mean().item()
+
+    elif confidence_type == 'reverse_adaptive':
+        # Reverse Adaptive confidence: B / (A + B)
+        # A = cross-entropy loss between current logits and ground truth
+        # B = entropy of the model logits
+        pred_logits = kwargs.get('pred_logits', None)
+        true_actions = kwargs.get('true_actions', None)
+
+        if pred_logits is None or true_actions is None:
+            # Fallback to constant confidence if logits not provided
+            return kwargs.get('confidence_value', 1.0)
+
+        # Calculate cross-entropy loss (A)
+        pred_probs = torch.softmax(pred_logits, dim=-1)
+        # Cross-entropy: -sum(true * log(pred))
+        cross_entropy = -torch.sum(true_actions * torch.log(pred_probs + 1e-10), dim=-1)
+
+        # Calculate entropy (B)
+        # Entropy: -sum(pred * log(pred))
+        entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
+
+        # Confidence = B / (A + B)
+        confidence = entropy / (cross_entropy + entropy + 1e-10)
+
+        # Return mean confidence across batch
+        return confidence.mean().item()
+
     else:
         raise ValueError(f"Unknown confidence type: {confidence_type}")
 
@@ -88,9 +140,6 @@ class OnlineEnvironmentManager:
     def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, current_iteration, debug=False):
         """Step environments and learn from confidence-interpolated targets using batched processing."""
         debug_info = {'env_steps': []} if debug else None
-        
-        # Calculate confidence using the specified confidence function
-        confidence = get_confidence_value(self.confidence_type, current_iteration, horizon, **self.confidence_kwargs)
         
         # PHASE 1: Collect data from all environments
         env_data = []
@@ -176,11 +225,26 @@ class OnlineEnvironmentManager:
         # Extract predictions at specific positions for each batch item
         batch_size = true_actions.shape[0]
         selected_pred_actions = torch.zeros_like(true_actions)  # [batch_size, action_dim]
-        
+
         for i in range(batch_size):
             pos = loss_positions[i].item()
             selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
-        
+
+        # Calculate confidence using the specified confidence function
+        # For adaptive and reverse_adaptive confidence, we need to pass the logits and true actions
+        if self.confidence_type in ['adaptive', 'reverse_adaptive']:
+            confidence = get_confidence_value(
+                self.confidence_type, current_iteration, horizon,
+                pred_logits=selected_pred_actions.detach(),
+                true_actions=true_actions,
+                **self.confidence_kwargs
+            )
+        else:
+            confidence = get_confidence_value(
+                self.confidence_type, current_iteration, horizon,
+                **self.confidence_kwargs
+            )
+
         # CONFIDENCE-BASED TARGET INTERPOLATION
         # Interpolate between true actions (one-hot) and model prediction probabilities
         # Convert logits to probabilities first
@@ -226,6 +290,8 @@ class OnlineEnvironmentManager:
                     conf_info += f"(λ={self.confidence_kwargs.get('confidence_lambda', 40)})"
                 elif self.confidence_type == 'stepped':
                     conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.3)}, max_pos={self.confidence_kwargs.get('max_position', horizon//2)})"
+                elif self.confidence_type in ['adaptive', 'reverse_adaptive']:
+                    conf_info += f"(dynamic)"
                     
                 print(f"Batch: Env {env_idx}: Context={data['context_size']}, Confidence={confidence:.3f} ({conf_info}), Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
                 
@@ -785,6 +851,8 @@ if __name__ == '__main__':
                     conf_info += f"(λ={confidence_lambda})"
                 elif confidence_type == 'stepped':
                     conf_info += f"(max_pos={max_position})"
+                elif confidence_type in ['adaptive', 'reverse_adaptive']:
+                    conf_info += f"(dynamic)"
                 printw(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f} ({conf_info})")
 
         train_loss.append(epoch_train_loss / epoch_iterations)

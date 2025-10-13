@@ -17,5 +17,5 @@ dropout: 0
 shuffle: true
 
 # Training configuration
-chutney: 100
+chutney: 1000
 seed: 1

@@ -1,0 +1,38 @@
+# Online training configuration for bandit environment
+# Using linear_interpolate loss: (1-beta) * CE - beta * Entropy
+env: "bandit"
+envs: 2000
+hists: 1
+samples: 1
+H: 100
+dim: 5
+var: 0.3
+cov: 0.0
+
+# Model configuration
+embd: 32
+head: 4
+layer: 4
+lr: 0.001
+dropout: 0
+shuffle: true
+
+# Online training configuration
+online_training: true
+n_epoch: 100
+seed: 1
+
+
+# Entropy penalty coefficient (beta) scheduling
+# Using linear_interpolate mode: Loss = (1-beta) * CE - beta * Entropy
+# Beta decreases from confidence_start to 0 over horizon
+# Early training: more entropy penalty (encourages exploration)
+# Late training: pure cross-entropy (encourages exploitation)
+confidence_type: linear_interpolate
+confidence_start: 0.5  # Starting beta value
+
+# Other available options:
+# linear: Loss = CE - beta * Entropy
+# stepped: Loss = CE - beta * Entropy (drops to 0 at max_position)
+# constant: Loss = CE - beta * Entropy (fixed beta)
+
