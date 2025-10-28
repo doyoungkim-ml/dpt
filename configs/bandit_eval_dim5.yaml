@@ -1,6 +1,6 @@
 # Evaluation configuration for bandit environment
 env: "bandit"
-dim: 10
+dim: 5
 var: 0.3
 cov: 0.0
 test_cov: -1.0
@@ -13,6 +13,6 @@ dropout: 0
 
 # Evaluation configuration
 n_eval: 100
-hor: 200
+hor: 100
 seed: 1
 shuffle: true

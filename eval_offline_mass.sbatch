@@ -14,9 +14,12 @@
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
+# create data
+singularity exec --nv --overlay /scratch/dk5268/pytorch-example/dpt.ext3:ro /share/apps/images/cuda12.6.3-cudnn9.5.1-ubuntu22.04.5.sif /bin/bash -c "source /ext3/env.sh; python collect_data.py --config "$1""
 
 # Run mass evaluation with config file and checkpoint directory
-python eval_mass.py --config "$1" --checkpoint_dir "$2"
+singularity exec --nv --overlay /scratch/dk5268/pytorch-example/dpt.ext3:ro /share/apps/images/cuda12.6.3-cudnn9.5.1-ubuntu22.04.5.sif /bin/bash -c "source /ext3/env.sh; python eval_mass.py --config "$1" --checkpoint_dir "$2""
+
 
 echo "Mass evaluation completed"
 mass_eval_dir=figs/mass_eval_$2
