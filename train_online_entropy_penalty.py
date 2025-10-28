@@ -38,11 +38,15 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.ba
 
 def get_beta_value(confidence_type, iteration, horizon, **kwargs):
     """Calculate beta (entropy penalty coefficient) based on the specified confidence function type.
-    
+
     Beta decreases over time (opposite of confidence in the original script).
     For linear: starts at confidence_start and decreases to 0.
     For stepped: starts at confidence_start, decreases to 0 at max_position, then stays at 0.
     For linear_interpolate: starts at confidence_start and decreases to 0 (used with interpolated loss).
+    For self_referential_entropy: beta = alpha * H[π(·|s_h, D_{h-1})]
+    For reward_variance: beta = σ²(r_{1:h-1}) / (μ(r_{1:h-1})² + ε)
+    For inverse_sqrt: beta = beta_0 / sqrt(h+1)
+    For reward_prediction_error: beta = |r_h - E[r_{1:h-1}]| / (std(r_{1:h-1}) + ε)
     """
     if confidence_type == 'linear':
         confidence_start = kwargs.get('confidence_start', 0.1)
@@ -67,6 +71,48 @@ def get_beta_value(confidence_type, iteration, horizon, **kwargs):
     elif confidence_type == 'constant':
         return kwargs.get('confidence_value', 0.1)
 
+    elif confidence_type == 'self_referential_entropy':
+        # beta = alpha * H[π(·|s_h, D_{h-1})]
+        # Policy entropy directly controls regularization
+        # High entropy → policy already exploring → maintain it
+        # Low entropy → policy converging → let it exploit
+        policy_entropy = kwargs.get('policy_entropy', 0.0)
+        alpha = kwargs.get('alpha', 0.05)  # Scaling factor (REDUCED from 0.1)
+        return alpha * policy_entropy
+
+    elif confidence_type == 'reward_variance':
+        # beta = α * min(σ²(r_{1:h-1}) / (μ(r_{1:h-1})² + ε), β_max)
+        # Coefficient-of-variation style normalization with clipping
+        reward_mean = kwargs.get('reward_mean', 0.0)
+        reward_var = kwargs.get('reward_var', 0.0)
+        epsilon = kwargs.get('epsilon', 1e-6)
+        alpha = kwargs.get('alpha', 1.0)  # Scaling factor
+        beta_max = kwargs.get('beta_max', 0.3)  # Maximum beta to prevent explosion
+
+        if abs(reward_mean) < epsilon:
+            # If mean is too small, return base value
+            return beta_max * 0.5
+
+        raw_beta = reward_var / (reward_mean ** 2 + epsilon)
+        return min(alpha * raw_beta, beta_max)
+
+    elif confidence_type == 'inverse_sqrt':
+        # beta = beta_0 / sqrt(h+1)
+        # From online learning theory - optimal regret bounds
+        # FIXED: Use much smaller beta_0 to avoid over-regularization
+        beta_0 = kwargs.get('beta_0', 0.5)  # REDUCED from 1.0
+        return beta_0 / np.sqrt(iteration + 1)
+
+    elif confidence_type == 'reward_prediction_error':
+        # beta = α * min(|r_actual - r_predicted|, β_max)
+        # Reward prediction error: actual vs predicted rewards with clipping
+        reward_prediction_error = kwargs.get('reward_prediction_error', 0.0)
+        alpha = kwargs.get('alpha', 0.5)  # Scaling factor
+        beta_max = kwargs.get('beta_max', 0.5)  # Maximum beta
+        
+        # Simple formula: β = α * min(error, β_max)
+        return min(alpha * reward_prediction_error, beta_max)
+
     else:
         raise ValueError(f"Unknown confidence type: {confidence_type}")
 
@@ -90,7 +136,6 @@ class OnlineEnvironmentManager:
         self.contexts = {i: {
             'states': [],
             'actions': [],
-            'next_states': [],
             'rewards': []
         } for i in range(len(self.envs))}
 
@@ -114,17 +159,83 @@ class OnlineEnvironmentManager:
                 env.place_agent(pos=init_pos, dir=init_dir)
                 current_state = env.agent.dir_vec[[0, -1]]
 
-            # DEBUG: Current context info
+            # DEBUG: Current context info (BEFORE adding new transition)
             context_size = len(self.contexts[env_idx]['states']) if debug else 0
             recent_rewards = self.contexts[env_idx]['rewards'][-3:] if debug and self.contexts[env_idx]['rewards'] else []
                 
-            # 1. Get model's action prediction BEFORE adding to context
-            if self.model is not None:
-                model_action = self._get_model_action(env_idx, current_state, debug=debug)
-            else:
-                # Fallback to random action for early training
-                model_action = self._get_random_action(env)
+            # Store data for batched processing
+            env_data.append({
+                'env_idx': env_idx,
+                'env': env,
+                'current_state': current_state,
+                'model_action': None,  # Will be filled by batched prediction
+                'reward': None,  # Will be filled after action execution
+                'next_state': None,  # Will be filled after action execution
+                'context_size': context_size,
+                'recent_rewards': recent_rewards
+            })
 
+        # PHASE 1B: Batched action prediction for all environments at once
+        if self.model is not None:
+            # Create input samples for all environments
+            inference_samples = []
+            for data in env_data:
+                sample = self._create_model_input_sample(data['env_idx'], data['current_state'])
+                
+                # Add dummy optimal action to make it compatible with batch_to_tensors
+                if self.env_type in ['bandit', 'linear_bandit']:
+                    sample['optimal_action'] = np.zeros(data['env'].dim)  # dummy
+                elif self.env_type.startswith('darkroom'):
+                    sample['optimal_action'] = np.zeros(5)  # dummy
+                elif self.env_type == 'miniworld':
+                    sample['optimal_action'] = np.zeros(data['env'].action_space.n)  # dummy
+                
+                inference_samples.append(sample)
+            
+            # Batch inference: single forward pass for all environments
+            with torch.no_grad():
+                if self.env_type == 'miniworld':
+                    inference_batch = batch_to_tensors(inference_samples, self.config, self.env_type, self.kwargs.get('transform'))
+                else:
+                    inference_batch = batch_to_tensors(inference_samples, self.config, self.env_type)
+                
+                inference_batch = {k: v.to(device) for k, v in inference_batch.items()}
+                
+                self.model.eval()
+                model_outputs = self.model(inference_batch)
+                pred_actions = model_outputs[0]
+                self.model.train()
+            
+            # Extract actions for each environment
+            for i, data in enumerate(env_data):
+                env_idx = data['env_idx']
+                context_len = len(self.contexts[env_idx]['states'])
+                sample_pos = min(context_len, pred_actions.shape[1] - 1)
+                
+                # Sample action from predicted distribution
+                if self.env_type == 'miniworld':
+                    probs = torch.softmax(pred_actions[i, sample_pos], dim=-1)
+                    action_idx = torch.multinomial(probs, 1).item()
+                    action = np.zeros(data['env'].action_space.n)
+                    action[action_idx] = 1.0
+                else:
+                    probs = torch.softmax(pred_actions[i, sample_pos], dim=-1)
+                    action_idx = torch.multinomial(probs, 1).item()
+                    action = np.zeros(len(probs))
+                    action[action_idx] = 1.0
+                
+                data['model_action'] = action
+        else:
+            # Fallback to random actions
+            for data in env_data:
+                data['model_action'] = self._get_random_action(data['env'])
+        
+        # PHASE 1C: Execute actions in environments
+        for data in env_data:
+            env = data['env']
+            current_state = data['current_state']
+            model_action = data['model_action']
+            
             # Execute action in environment
             if self.env_type in ['bandit', 'linear_bandit']:
                 next_state, reward = env.transit(current_state, model_action)
@@ -135,35 +246,34 @@ class OnlineEnvironmentManager:
                 action_idx = np.argmax(model_action)
                 _, reward, _, _, _ = env.step(action_idx)
                 next_state = env.agent.dir_vec[[0, -1]]
-
-            # 2. Add transition to context BEFORE learning
-            self.contexts[env_idx]['states'].append(current_state)
-            self.contexts[env_idx]['actions'].append(model_action)
-            self.contexts[env_idx]['next_states'].append(next_state)
-            self.contexts[env_idx]['rewards'].append(reward)
-
-            # Truncate context if too long
-            if len(self.contexts[env_idx]['states']) > self.horizon:
-                for key in self.contexts[env_idx]:
-                    self.contexts[env_idx][key] = self.contexts[env_idx][key][-self.horizon:]
-
-            # Store data for batched processing
-            env_data.append({
-                'env_idx': env_idx,
-                'env': env,
-                'current_state': current_state,
-                'model_action': model_action,
-                'reward': reward,
-                'next_state': next_state,
-                'context_size': context_size,
-                'recent_rewards': recent_rewards
-            })
+            
+            data['reward'] = reward
+            data['next_state'] = next_state
 
         # PHASE 2: Create batch of training samples
+        # NOTE: At this point, contexts contain past (s, a, r) tuples
+        # We'll add the current state to create the full sequence for prediction
+        for data in env_data:
+            # Add current state (query state) and dummy action/reward for prediction
+            self.contexts[data['env_idx']]['states'].append(data['current_state'])
+            self.contexts[data['env_idx']]['actions'].append(data['model_action'])  # Will be replaced with dummy
+            self.contexts[data['env_idx']]['rewards'].append(0.0)  # Dummy, will predict
+            
+            # Truncate if too long
+            if len(self.contexts[data['env_idx']]['states']) > self.horizon + 1:  # +1 for query state
+                for key in self.contexts[data['env_idx']]:
+                    self.contexts[data['env_idx']][key] = self.contexts[data['env_idx']][key][-(self.horizon + 1):]
+        
         training_samples = []
         for data in env_data:
             training_sample = self._create_training_sample(data['env'], data['env_idx'], data['current_state'])
             training_samples.append(training_sample)
+        
+        # Now update contexts with real rewards (after training samples created)
+        for data in env_data:
+            # Update the last reward to be the actual reward
+            if len(self.contexts[data['env_idx']]['rewards']) > 0:
+                self.contexts[data['env_idx']]['rewards'][-1] = data['reward']
 
         # PHASE 3: Batched forward and backward pass
         if self.env_type == 'miniworld':
@@ -176,21 +286,70 @@ class OnlineEnvironmentManager:
 
         # Forward pass for entire batch
         true_actions = batch['optimal_actions']  # Shape: [batch_size, action_dim]
-        pred_actions = self.model(batch)         # Shape: [batch_size, horizon, action_dim]
+        for key, value in batch.items():
+            #printw the first batch element of the value
+            printw(f"{key}: {value[0]}")
+        model_outputs = self.model(batch)        # Returns (pred_actions, pred_rewards)
+        pred_actions, pred_rewards = model_outputs[0], model_outputs[1]  # Shape: [batch_size, max_seq_len, action_dim], [batch_size, max_seq_len, 1]
+        printw(f"pred_actions: {pred_actions[0]}")
+        printw(f"pred_rewards: {pred_rewards[0]}")
         loss_positions = batch['loss_positions'] # Shape: [batch_size]
         
         # Extract predictions at specific positions for each batch item
         batch_size = true_actions.shape[0]
         selected_pred_actions = torch.zeros_like(true_actions)  # [batch_size, action_dim]
+        selected_pred_rewards = torch.zeros(batch_size, 1).to(device)  # [batch_size, 1]
 
         for i in range(batch_size):
             pos = loss_positions[i].item()
             selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
+            selected_pred_rewards[i] = pred_rewards[i, pos]   # Get reward prediction at specific position
+
+        # Compute statistics needed for different beta schedules
+        beta_kwargs = dict(self.confidence_kwargs)
+
+        # 1. Policy entropy (for self_referential_entropy)
+        if self.confidence_type == 'self_referential_entropy':
+            pred_probs = torch.softmax(selected_pred_actions, dim=-1)
+            policy_entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).mean().item()
+            beta_kwargs['policy_entropy'] = policy_entropy
+
+        # 2. Reward prediction error (for reward_prediction_error only)
+        if self.confidence_type == 'reward_prediction_error':
+            # Get actual rewards from the current step (stored in env_data)
+            actual_rewards = np.array([data['reward'] for data in env_data])
+            # Get predicted rewards from the model (detach to avoid gradient issues)
+            predicted_rewards = selected_pred_rewards.detach().cpu().numpy().flatten()
+            # Mean absolute prediction error for the current position
+            # printw(f"actual rewards: {actual_rewards}")
+            # printw(f"predicted rewards: {predicted_rewards}")
+            # printw(f"reward prediction error: {np.abs(predicted_rewards - actual_rewards)}")
+            reward_prediction_error = np.mean(np.abs(predicted_rewards - actual_rewards))
+            beta_kwargs['reward_prediction_error'] = reward_prediction_error
+            
+        # Reward statistics (for reward_variance - keep this for other confidence types)
+        elif self.confidence_type == 'reward_variance':
+            # Aggregate rewards from all environments up to current iteration
+            all_rewards = []
+            current_rewards = []
+            for env_idx in range(len(self.envs)):
+                env_rewards = self.contexts[env_idx]['rewards']
+                if len(env_rewards) > 0:
+                    all_rewards.extend(env_rewards[:-1])  # All but last (history)
+                    current_rewards.append(env_rewards[-1])  # Current reward
+
+            if len(all_rewards) > 0:
+                reward_mean = np.mean(all_rewards)
+                reward_var = np.var(all_rewards)
+                reward_std = np.std(all_rewards)
+                beta_kwargs['reward_mean'] = reward_mean
+                beta_kwargs['reward_var'] = reward_var
+                beta_kwargs['reward_std'] = reward_std
 
         # Calculate beta (entropy penalty coefficient)
         beta = get_beta_value(
             self.confidence_type, current_iteration, horizon,
-            **self.confidence_kwargs
+            **beta_kwargs
         )
 
         # ENTROPY-PENALIZED CROSS-ENTROPY LOSS
@@ -201,18 +360,27 @@ class OnlineEnvironmentManager:
         # Standard cross-entropy loss
         ce_loss = loss_fn(selected_pred_actions, true_actions)
         
+        # Get true rewards for reward prediction loss
+        true_rewards = torch.zeros(batch_size, 1).to(device)
+        for i, data in enumerate(env_data):
+            true_rewards[i] = data['reward']
+        
+        # Reward prediction loss (MSE)
+        reward_loss = torch.nn.functional.mse_loss(selected_pred_rewards, true_rewards)
+        
         # Calculate entropy of model predictions
         pred_probs = torch.softmax(selected_pred_actions, dim=-1)
         entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
         total_entropy = entropy.sum()
         
         # Final loss: depends on confidence type
+        # Total loss = action_loss + reward_loss - beta * entropy
         if self.confidence_type == 'linear_interpolate':
-            # Interpolated loss: (1-beta) * CE - beta * entropy
-            loss = (1 - beta) * ce_loss - beta * total_entropy
+            # Interpolated loss: (1-beta) * CE + reward_loss - beta * entropy
+            loss = (1 - beta) * ce_loss + reward_loss - beta * total_entropy
         else:
-            # Standard entropy penalty: CE - beta * entropy
-            loss = ce_loss - beta * total_entropy
+            # Standard entropy penalty: CE + reward_loss - beta * entropy
+            loss = ce_loss + reward_loss - beta * total_entropy
         
         # Single backward pass for entire batch
         optimizer.zero_grad()
@@ -308,7 +476,11 @@ class OnlineEnvironmentManager:
 
             # Get model prediction
             self.model.eval()
-            pred_actions = self.model(batch)
+
+
+            model_outputs = self.model(batch)
+            
+            pred_actions = model_outputs[0]
 
             # Get the position to sample from (last non-padded position)
             context_len = len(self.contexts[env_idx]['states'])
@@ -344,62 +516,84 @@ class OnlineEnvironmentManager:
         return action
 
     def _create_model_input_sample(self, env_idx, query_state):
-        """Create sample for model input (without optimal action)."""
+        """Create sample for model input - just use the context which already includes the current state."""
         context = self.contexts[env_idx]
-
-        # RIGHT PADDING: Pad context if needed
         context_len = len(context['states'])
-        if context_len < self.horizon:
-            pad_len = self.horizon - context_len
+        
+        # Handle empty context case - should have at least current state
+        if context_len == 0:
+            context_len = 1
+            states = np.array([query_state])
+            
+            # Determine action dimension
+            if self.env_type in ['bandit', 'linear_bandit']:
+                action_dim = self.envs[env_idx].dim
+            elif self.env_type.startswith('darkroom'):
+                action_dim = 5
+            elif self.env_type == 'miniworld':
+                action_dim = self.envs[env_idx].action_space.n
+            else:
+                action_dim = self.config['action_dim']
+            
+            actions = np.zeros((1, action_dim))
+            rewards = np.array([0.0])
+            
             if self.env_type == 'miniworld':
-                dummy_image = np.zeros(self.kwargs.get('target_shape', (25, 25, 3)))
-                dummy_state = np.zeros(2)
-                dummy_action = np.zeros(self.envs[env_idx].action_space.n)
-
-                # RIGHT PADDING: real data first, then padding
-                padded_images = context.get('images', [dummy_image] * context_len) + [dummy_image] * pad_len
-                padded_states = context['states'] + [dummy_state] * pad_len
-                padded_actions = context['actions'] + [dummy_action] * pad_len
-                padded_next_states = context['next_states'] + [dummy_state] * pad_len
-                padded_rewards = context['rewards'] + [0.0] * pad_len
-
+                env = self.envs[env_idx]
                 return {
-                    'query_image': env.render_obs(),
-                    'query_state': query_state,
-                    'context_images': np.array(padded_images),
-                    'context_states': np.array(padded_states),
-                    'context_actions': np.array(padded_actions),
-                    'context_next_states': np.array(padded_next_states),
-                    'context_rewards': np.array(padded_rewards),
-                    'loss_position': context_len - 1,  # Position for loss calculation
+                    'context_images': np.array([env.render_obs()]),
+                    'context_states': states,
+                    'context_actions': actions,
+                    'context_rewards': rewards,
+                    'loss_position': 0,
+                    'context_length': context_len,
                 }
             else:
-                if self.env_type in ['bandit', 'linear_bandit']:
-                    dummy_state = np.array([1])
-                    dummy_action = np.zeros(self.envs[env_idx].dim)
-                else:  # darkroom
-                    dummy_state = np.zeros(2)
-                    dummy_action = np.zeros(5)
-
-                # RIGHT PADDING: real data first, then padding
-                padded_states = context['states'] + [dummy_state] * pad_len
-                padded_actions = context['actions'] + [dummy_action] * pad_len
-                padded_next_states = context['next_states'] + [dummy_state] * pad_len
-                padded_rewards = context['rewards'] + [0.0] * pad_len
+                return {
+                    'context_states': states,
+                    'context_actions': actions,
+                    'context_rewards': rewards,
+                    'loss_position': 0,
+                    'context_length': context_len,
+                }
+        
+        if self.env_type == 'miniworld':
+            env = self.envs[env_idx]
+            context_images = context.get('images', [])
+            
+            # Get sequences (already includes current state at the end)
+            states = np.array(context['states'])
+            actions = np.array(context['actions'])
+            rewards = np.array(context['rewards'])
+            images = np.array(context_images) if context_images else None
+            
+            # Find position to compute loss (last position with current state)
+            loss_position = context_len - 1
+            
+            return {
+                'context_images': images,
+                'context_states': states,
+                'context_actions': actions,
+                'context_rewards': rewards,
+                'loss_position': loss_position,
+                'context_length': context_len,
+            }
         else:
-            padded_states = context['states']
-            padded_actions = context['actions']
-            padded_next_states = context['next_states']
-            padded_rewards = context['rewards']
-
-        return {
-            'query_state': query_state,
-            'context_states': np.array(padded_states),
-            'context_actions': np.array(padded_actions),
-            'context_next_states': np.array(padded_next_states),
-            'context_rewards': np.array(padded_rewards),
-            'loss_position': min(context_len - 1, self.horizon - 1),  # Position for loss calculation
-        }
+            # Get sequences (already includes current state at the end)
+            states = np.array(context['states'])
+            actions = np.array(context['actions'])
+            rewards = np.array(context['rewards'])
+            
+            # Find position to compute loss (last position with current state)
+            loss_position = context_len - 1
+            
+            return {
+                'context_states': states,
+                'context_actions': actions,
+                'context_rewards': rewards,
+                'loss_position': loss_position,
+                'context_length': context_len,
+            }
 
     def _create_training_sample(self, env, env_idx, query_state):
         """Create training sample with optimal action as target."""
@@ -440,95 +634,97 @@ def batch_to_tensors(batch_data, config, env_type, transform=None):
 
 
 def batch_to_tensors_standard(batch_data, config):
-    """Convert standard (non-image) batch data to tensors."""
-    horizon = config['horizon']
+    """Convert standard (non-image) batch data to tensors with variable-length sequences."""
     state_dim = config['state_dim']
     action_dim = config['action_dim']
 
     batch_size = len(batch_data)
 
-    # Initialize tensors
-    query_states = torch.zeros(batch_size, state_dim)
+    # Get maximum sequence length in batch
+    max_len = max(sample['context_length'] for sample in batch_data)
+    
+    # Initialize tensors with max length
     optimal_actions = torch.zeros(batch_size, action_dim)
-    context_states = torch.zeros(batch_size, horizon, state_dim)
-    context_actions = torch.zeros(batch_size, horizon, action_dim)
-    context_next_states = torch.zeros(batch_size, horizon, state_dim)
-    context_rewards = torch.zeros(batch_size, horizon, 1)
-    loss_positions = torch.zeros(batch_size, dtype=torch.long)  # Positions for loss calculation
-
-    # Create zeros tensor like in Dataset class
-    zeros = torch.zeros(state_dim ** 2 + action_dim + 1)
-
+    context_states = torch.zeros(batch_size, max_len, state_dim)
+    context_actions = torch.zeros(batch_size, max_len, action_dim)
+    context_rewards = torch.zeros(batch_size, max_len, 1)
+    loss_positions = torch.zeros(batch_size, dtype=torch.long)
+    
     for i, sample in enumerate(batch_data):
-        query_states[i] = torch.from_numpy(sample['query_state']).float()
         optimal_actions[i] = torch.from_numpy(sample['optimal_action']).float()
-        context_states[i] = torch.from_numpy(sample['context_states']).float()
-        context_actions[i] = torch.from_numpy(sample['context_actions']).float()
-        context_next_states[i] = torch.from_numpy(sample['context_next_states']).float()
-        context_rewards[i] = torch.from_numpy(sample['context_rewards']).float().unsqueeze(-1)
+        seq_len = sample['context_length']
+        
+        # Fill sequences (context already includes current state at the end)
+        context_states[i, :seq_len] = torch.from_numpy(sample['context_states']).float()
+        context_actions[i, :seq_len] = torch.from_numpy(sample['context_actions']).float()
+        
+        # Handle context_rewards shape
+        rewards_array = sample['context_rewards']
+        if len(rewards_array.shape) == 1:
+            rewards_array = rewards_array.reshape(-1, 1)
+        context_rewards[i, :seq_len] = torch.from_numpy(rewards_array).float()
+        
         loss_positions[i] = sample['loss_position']
 
     return {
-        'query_states': query_states,
         'optimal_actions': optimal_actions,
         'context_states': context_states,
         'context_actions': context_actions,
-        'context_next_states': context_next_states,
         'context_rewards': context_rewards,
         'loss_positions': loss_positions,
-        'zeros': zeros.unsqueeze(0).repeat(batch_size, 1),
+        'context_lengths': torch.tensor([sample['context_length'] for sample in batch_data], dtype=torch.long),
     }
 
 
 def batch_to_tensors_miniworld(batch_data, config, transform):
-    """Convert miniworld batch data to tensors."""
-    horizon = config['horizon']
+    """Convert miniworld batch data to tensors with variable-length sequences."""
     state_dim = config['state_dim']
     action_dim = config['action_dim']
     image_size = config['image_size']
 
     batch_size = len(batch_data)
+    
+    # Get maximum sequence length in batch
+    max_len = max(sample['context_length'] for sample in batch_data)
 
-    # Initialize tensors
-    query_images = torch.zeros(batch_size, 3, image_size, image_size)
-    query_states = torch.zeros(batch_size, state_dim)
+    # Initialize tensors with max length
     optimal_actions = torch.zeros(batch_size, action_dim)
-    context_images = torch.zeros(batch_size, horizon, 3, image_size, image_size)
-    context_states = torch.zeros(batch_size, horizon, state_dim)
-    context_actions = torch.zeros(batch_size, horizon, action_dim)
-    context_rewards = torch.zeros(batch_size, horizon, 1)
-    loss_positions = torch.zeros(batch_size, dtype=torch.long)  # Positions for loss calculation
-
-    # Create zeros tensor like in Dataset class
-    zeros = torch.zeros(state_dim ** 2 + action_dim + 1)
+    context_images = torch.zeros(batch_size, max_len, 3, image_size, image_size)
+    context_states = torch.zeros(batch_size, max_len, state_dim)
+    context_actions = torch.zeros(batch_size, max_len, action_dim)
+    context_rewards = torch.zeros(batch_size, max_len, 1)
+    loss_positions = torch.zeros(batch_size, dtype=torch.long)
 
     for i, sample in enumerate(batch_data):
-        # Query data
-        query_img = transform(sample['query_image'])
-        query_images[i] = query_img
-        query_states[i] = torch.from_numpy(sample['query_state']).float()
         optimal_actions[i] = torch.from_numpy(sample['optimal_action']).float()
-
-        # Context data
-        for h in range(horizon):
-            context_img = transform(sample['context_images'][h])
-            context_images[i, h] = context_img
-
-        context_states[i] = torch.from_numpy(sample['context_states']).float()
-        context_actions[i] = torch.from_numpy(sample['context_actions']).float()
-        context_rewards[i] = torch.from_numpy(sample['context_rewards']).float().unsqueeze(-1)
+        seq_len = sample['context_length']
+        
+        # Transform images
+        for h in range(seq_len):
+            if sample['context_images'] is not None and len(sample['context_images']) > 0:
+                context_img = transform(sample['context_images'][h])
+                context_images[i, h] = context_img
+        
+        # Fill sequences
+        context_states[i, :seq_len] = torch.from_numpy(sample['context_states']).float()
+        context_actions[i, :seq_len] = torch.from_numpy(sample['context_actions']).float()
+        
+        # Handle context_rewards shape
+        rewards_array = sample['context_rewards']
+        if len(rewards_array.shape) == 1:
+            rewards_array = rewards_array.reshape(-1, 1)
+        context_rewards[i, :seq_len] = torch.from_numpy(rewards_array).float()
+        
         loss_positions[i] = sample['loss_position']
 
     return {
-        'query_images': query_images,
-        'query_states': query_states,
         'optimal_actions': optimal_actions,
         'context_images': context_images,
         'context_states': context_states,
         'context_actions': context_actions,
         'context_rewards': context_rewards,
         'loss_positions': loss_positions,
-        'zeros': zeros.unsqueeze(0).repeat(batch_size, 1),
+        'context_lengths': torch.tensor([sample['context_length'] for sample in batch_data], dtype=torch.long),
     }
 
 
@@ -734,6 +930,7 @@ if __name__ == '__main__':
             print(string, file=f)
 
     train_loss = []
+    step_losses = []  # Store loss for every step (iteration)
     beta_schedule = []
     total_iterations = 0
 
@@ -800,9 +997,10 @@ if __name__ == '__main__':
             epoch_train_loss += iteration_loss
             epoch_iterations += 1
             total_iterations += 1
+            step_losses.append(iteration_loss)  # Store step-level loss
             beta_schedule.append(beta)
 
-            if iteration % 10 == 0:
+            if iteration % 1 == 0:
                 conf_info = confidence_type
                 if confidence_type == 'stepped':
                     conf_info += f"(max_pos={max_position})"
@@ -830,20 +1028,25 @@ if __name__ == '__main__':
             
             plt.subplot(1, 2, 1)
             plt.yscale('log')
-            plt.plot(train_loss[1:], label="Train Loss")
+            # Plot loss for every step, not every epoch
+            if len(step_losses) > 1:
+                plt.plot(step_losses, label="Train Loss")
             plt.legend()
             plt.title(f"Online Training Loss (Entropy Penalty) - {env} ({confidence_type.title()} Beta)")
-            plt.xlabel("Epoch")
+            plt.xlabel("Step")
             plt.ylabel("Loss")
             
             # Plot beta schedule
             plt.subplot(1, 2, 2)
-            plt.plot(beta_schedule, label=f"Beta Schedule ({confidence_type})")
+            if len(beta_schedule) > 0:
+                plt.plot(beta_schedule, label=f"Beta Schedule ({confidence_type})")
             plt.legend()
             plt.title(f"{confidence_type.title()} Beta Schedule - {env}")
             plt.xlabel("Iteration")
             plt.ylabel("Beta (Entropy Penalty Coefficient)")
-            plt.ylim(0, max(confidence_start, confidence_value) * 1.1)
+            # Adjust y-axis to fit all data
+            if len(beta_schedule) > 0:
+                plt.ylim(bottom=0)
             
             plt.tight_layout()
             plt.savefig(f"{experiment_dir}/train_loss.png")

@@ -1,0 +1,32 @@
+# Online training configuration for bandit environment
+# Reward Prediction Error Schedule: β = α * min(|r_actual - r_predicted| / (std(r) + ε), β_max)
+# Beta is based on how wrong the model is about rewards
+env: "bandit"
+envs: 1000
+hists: 1
+samples: 1
+H: 200
+dim: 10
+var: 0.3
+cov: 0.0
+
+# Model configuration
+embd: 32
+head: 4
+layer: 4
+lr: 0.001
+dropout: 0
+shuffle: true
+
+# Online training configuration
+online_training: true
+n_epoch: 100
+seed: 1
+
+# Reward Prediction Error Schedule (From Online Learning Theory)
+# Beta increases with prediction error, promoting exploration when model is uncertain
+confidence_type: reward_prediction_error
+alpha: 0.5  # Scaling factor for normalized prediction error
+beta_max: 0.5  # Maximum beta value to prevent over-exploration
+
+

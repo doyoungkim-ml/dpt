@@ -3,8 +3,8 @@ env: "bandit"
 envs: 1000
 hists: 1
 samples: 1
-H: 200
-dim: 10
+H: 100
+dim: 5
 var: 0.3
 cov: 0.0
 

@@ -392,28 +392,60 @@ if __name__ == '__main__':
     if env == 'bandit':
         config.update({'dim': dim, 'var': var, 'cov': cov, 'type': 'uniform'})
 
+        # Check if files already exist BEFORE any computation
+        train_filepath = build_bandit_data_filename(env, n_envs, config, mode=0)
+        test_filepath = build_bandit_data_filename(env, n_envs, config, mode=1)
+        eval_filepath = build_bandit_data_filename(env, n_eval_envs, config, mode=2)
+        
+        if os.path.exists(train_filepath) and os.path.exists(test_filepath) and os.path.exists(eval_filepath):
+            print(f"Data files already exist, skipping data generation:")
+            print(f"  Train: {train_filepath}")
+            print(f"  Test: {test_filepath}")
+            print(f"  Eval: {eval_filepath}")
+            print("Exiting early to avoid unnecessary computation.")
+            exit(0)
+
         train_trajs = generate_bandit_histories(n_train_envs, **config)
         test_trajs = generate_bandit_histories(n_test_envs, **config)
         eval_trajs = generate_bandit_histories(n_eval_envs, **config)
 
-        train_filepath = build_bandit_data_filename(env, n_envs, config, mode=0)
-        test_filepath = build_bandit_data_filename(env, n_envs, config, mode=1)
-        eval_filepath = build_bandit_data_filename(env, n_eval_envs, config, mode=2)
-
     elif env == 'linear_bandit':
         config.update({'dim': dim, 'lin_d': lin_d, 'var': var, 'cov': cov, 'data_type': 'thompson'})
+
+        # Check if files already exist BEFORE any computation
+        train_filepath = build_linear_bandit_data_filename(env, n_envs, config, mode=0)
+        test_filepath = build_linear_bandit_data_filename(env, n_envs, config, mode=1)
+        eval_filepath = build_linear_bandit_data_filename(env, n_eval_envs, config, mode=2)
+        
+        if os.path.exists(train_filepath) and os.path.exists(test_filepath) and os.path.exists(eval_filepath):
+            print(f"Data files already exist, skipping data generation:")
+            print(f"  Train: {train_filepath}")
+            print(f"  Test: {test_filepath}")
+            print(f"  Eval: {eval_filepath}")
+            print("Exiting early to avoid unnecessary computation.")
+            exit(0)
 
         train_trajs = generate_linear_bandit_histories(n_train_envs, **config)
         test_trajs = generate_linear_bandit_histories(n_test_envs, **config)
         eval_trajs = generate_linear_bandit_histories(n_eval_envs, **config)
 
-        train_filepath = build_linear_bandit_data_filename(env, n_envs, config, mode=0)
-        test_filepath = build_linear_bandit_data_filename(env, n_envs, config, mode=1)
-        eval_filepath = build_linear_bandit_data_filename(env, n_eval_envs, config, mode=2)
-
     elif env == 'darkroom_heldout':
 
         config.update({'dim': dim, 'rollin_type': 'uniform'})
+        
+        # Check if files already exist BEFORE any computation
+        train_filepath = build_darkroom_data_filename(env, n_envs, config, mode=0)
+        test_filepath = build_darkroom_data_filename(env, n_envs, config, mode=1)
+        eval_filepath = build_darkroom_data_filename(env, 100, config, mode=2)
+        
+        if os.path.exists(train_filepath) and os.path.exists(test_filepath) and os.path.exists(eval_filepath):
+            print(f"Data files already exist, skipping data generation:")
+            print(f"  Train: {train_filepath}")
+            print(f"  Test: {test_filepath}")
+            print(f"  Eval: {eval_filepath}")
+            print("Exiting early to avoid unnecessary computation.")
+            exit(0)
+            
         goals = np.array([[(j, i) for i in range(dim)]
                          for j in range(dim)]).reshape(-1, 2)
         np.random.RandomState(seed=0).shuffle(goals)
@@ -430,12 +462,6 @@ if __name__ == '__main__':
         test_trajs = generate_darkroom_histories(test_goals, **config)
         eval_trajs = generate_darkroom_histories(eval_goals, **config)
 
-        train_filepath = build_darkroom_data_filename(
-            env, n_envs, config, mode=0)
-        test_filepath = build_darkroom_data_filename(
-            env, n_envs, config, mode=1)
-        eval_filepath = build_darkroom_data_filename(env, 100, config, mode=2)
-
 
     elif env == 'miniworld':
         import gymnasium as gym
@@ -449,23 +475,28 @@ if __name__ == '__main__':
             env_id_start = 0
             env_id_end = n_envs
 
+        # Check if files already exist BEFORE any computation
+        train_filepath = build_miniworld_data_filename(env, env_id_start, env_id_end, config, mode=0)
+        test_filepath = build_miniworld_data_filename(env, env_id_start, env_id_end, config, mode=1)
+        eval_filepath = build_miniworld_data_filename(env, 0, 100, config, mode=2)
+        
+        if os.path.exists(train_filepath) and os.path.exists(test_filepath) and os.path.exists(eval_filepath):
+            print(f"Data files already exist, skipping data generation:")
+            print(f"  Train: {train_filepath}")
+            print(f"  Test: {test_filepath}")
+            print(f"  Eval: {eval_filepath}")
+            print("Exiting early to avoid unnecessary computation.")
+            exit(0)
+
         # make sure you don't just generate the same data when batching data collection
         np.random.seed(0 + env_id_start)    
         random.seed(0 + env_id_start)       
-
 
         env_ids = np.arange(env_id_start, env_id_end)
 
         train_test_split = int(.8 * len(env_ids))
         train_env_ids = env_ids[:train_test_split]
         test_env_ids = env_ids[train_test_split:]
-
-        train_filepath = build_miniworld_data_filename(
-            env, env_id_start, env_id_end, config, mode=0)
-        test_filepath = build_miniworld_data_filename(
-            env, env_id_start, env_id_end, config, mode=1)
-        eval_filepath = build_miniworld_data_filename(env, 0, 100, config, mode=2)
-
 
         train_trajs = generate_miniworld_histories(
             train_env_ids,

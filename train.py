@@ -2,8 +2,15 @@ import torch.multiprocessing as mp
 if mp.get_start_method(allow_none=True) is None:
     mp.set_start_method('spawn', force=True)  # or 'forkserver'
 
-import argparse
 import os
+# Fix OpenBLAS deadlock by setting environment variables before any other imports
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
+import argparse
 import time
 import yaml
 from IPython import embed
@@ -291,7 +298,7 @@ if __name__ == '__main__':
                 print(f"Batch {i} of {len(test_loader)}", end='\r')
                 batch = {k: v.to(device) for k, v in batch.items()}
                 true_actions = batch['optimal_actions']
-                pred_actions = model(batch)
+                pred_actions, _ = model(batch)  # Unpack tuple to get predictions
                 true_actions = true_actions.unsqueeze(
                     1).repeat(1, pred_actions.shape[1], 1)
                 true_actions = true_actions.reshape(-1, action_dim)
@@ -314,7 +321,7 @@ if __name__ == '__main__':
             print(f"Batch {i} of {len(train_loader)}", end='\r')
             batch = {k: v.to(device) for k, v in batch.items()}
             true_actions = batch['optimal_actions']
-            pred_actions = model(batch)
+            pred_actions, _ = model(batch)  # Unpack tuple to get predictions
             true_actions = true_actions.unsqueeze(
                 1).repeat(1, pred_actions.shape[1], 1)
             true_actions = true_actions.reshape(-1, action_dim)
