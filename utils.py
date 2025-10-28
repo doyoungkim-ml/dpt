@@ -1,7 +1,16 @@
 import numpy as np
 import torch
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def get_device():
+    """Get the best available device (CUDA > MPS > CPU)."""
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    else:
+        return torch.device('cpu')
+
+device = get_device()
 
 def worker_init_fn(worker_id):
     worker_seed = torch.initial_seed() % (2**32) + worker_id

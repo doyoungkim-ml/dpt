@@ -4,7 +4,7 @@ import torch
 
 from ctrls.ctrl_bandit import Controller
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
 
 class DarkroomOptPolicy(Controller):

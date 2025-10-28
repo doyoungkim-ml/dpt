@@ -146,7 +146,7 @@ def main():
     
     # Load checkpoint
     print(f"Loading model from {args.model_path}")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     checkpoint = torch.load(args.model_path, map_location=device)
     model.load_state_dict(checkpoint)
     
@@ -157,8 +157,7 @@ def main():
     model.eval()
     
     # Move to GPU if available
-    if torch.cuda.is_available():
-        model = model.cuda()
+    model = model.to(device)
     
     # Run evaluation
     dataset_config = {

@@ -5,7 +5,6 @@ if mp.get_start_method(allow_none=True) is None:
 import argparse
 import os
 import time
-import yaml
 from IPython import embed
 
 import matplotlib.pyplot as plt
@@ -41,11 +40,11 @@ def get_confidence_value(confidence_type, iteration, horizon, **kwargs):
     if confidence_type == 'linear':
         confidence_start = kwargs.get('confidence_start', 0.3)
         return confidence_start * (1 - iteration / horizon) + 1.0 * (iteration / horizon)
-
+        
     elif confidence_type == 'exponential':
         confidence_lambda = kwargs.get('confidence_lambda', 40)
         return 1.0 - np.exp(-iteration / confidence_lambda)
-
+        
     elif confidence_type == 'stepped':
         confidence_start = kwargs.get('confidence_start', 0.3)
         max_position = kwargs.get('max_position', horizon // 2)
@@ -54,62 +53,10 @@ def get_confidence_value(confidence_type, iteration, horizon, **kwargs):
         else:
             # Linear interpolation from confidence_start to 1.0 up to max_position
             return confidence_start + (1.0 - confidence_start) * (iteration / max_position)
-
+            
     elif confidence_type == 'constant':
         return kwargs.get('confidence_value', 1.0)
-
-    elif confidence_type == 'adaptive':
-        # Adaptive confidence: A / (A + B)
-        # A = cross-entropy loss between current logits and ground truth
-        # B = entropy of the model logits
-        pred_logits = kwargs.get('pred_logits', None)
-        true_actions = kwargs.get('true_actions', None)
-
-        if pred_logits is None or true_actions is None:
-            # Fallback to constant confidence if logits not provided
-            return kwargs.get('confidence_value', 1.0)
-
-        # Calculate cross-entropy loss (A)
-        pred_probs = torch.softmax(pred_logits, dim=-1)
-        # Cross-entropy: -sum(true * log(pred))
-        cross_entropy = -torch.sum(true_actions * torch.log(pred_probs + 1e-10), dim=-1)
-
-        # Calculate entropy (B)
-        # Entropy: -sum(pred * log(pred))
-        entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
-
-        # Confidence = A / (A + B)
-        confidence = cross_entropy / (cross_entropy + entropy + 1e-10)
-
-        # Return mean confidence across batch
-        return confidence.mean().item()
-
-    elif confidence_type == 'reverse_adaptive':
-        # Reverse Adaptive confidence: B / (A + B)
-        # A = cross-entropy loss between current logits and ground truth
-        # B = entropy of the model logits
-        pred_logits = kwargs.get('pred_logits', None)
-        true_actions = kwargs.get('true_actions', None)
-
-        if pred_logits is None or true_actions is None:
-            # Fallback to constant confidence if logits not provided
-            return kwargs.get('confidence_value', 1.0)
-
-        # Calculate cross-entropy loss (A)
-        pred_probs = torch.softmax(pred_logits, dim=-1)
-        # Cross-entropy: -sum(true * log(pred))
-        cross_entropy = -torch.sum(true_actions * torch.log(pred_probs + 1e-10), dim=-1)
-
-        # Calculate entropy (B)
-        # Entropy: -sum(pred * log(pred))
-        entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
-
-        # Confidence = B / (A + B)
-        confidence = entropy / (cross_entropy + entropy + 1e-10)
-
-        # Return mean confidence across batch
-        return confidence.mean().item()
-
+        
     else:
         raise ValueError(f"Unknown confidence type: {confidence_type}")
 
@@ -140,6 +87,9 @@ class OnlineEnvironmentManager:
     def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, current_iteration, debug=False):
         """Step environments and learn from confidence-interpolated targets using batched processing."""
         debug_info = {'env_steps': []} if debug else None
+        
+        # Calculate confidence using the specified confidence function
+        confidence = get_confidence_value(self.confidence_type, current_iteration, horizon, **self.confidence_kwargs)
         
         # PHASE 1: Collect data from all environments
         env_data = []
@@ -225,26 +175,11 @@ class OnlineEnvironmentManager:
         # Extract predictions at specific positions for each batch item
         batch_size = true_actions.shape[0]
         selected_pred_actions = torch.zeros_like(true_actions)  # [batch_size, action_dim]
-
+        
         for i in range(batch_size):
             pos = loss_positions[i].item()
             selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
-
-        # Calculate confidence using the specified confidence function
-        # For adaptive and reverse_adaptive confidence, we need to pass the logits and true actions
-        if self.confidence_type in ['adaptive', 'reverse_adaptive']:
-            confidence = get_confidence_value(
-                self.confidence_type, current_iteration, horizon,
-                pred_logits=selected_pred_actions.detach(),
-                true_actions=true_actions,
-                **self.confidence_kwargs
-            )
-        else:
-            confidence = get_confidence_value(
-                self.confidence_type, current_iteration, horizon,
-                **self.confidence_kwargs
-            )
-
+        
         # CONFIDENCE-BASED TARGET INTERPOLATION
         # Interpolate between true actions (one-hot) and model prediction probabilities
         # Convert logits to probabilities first
@@ -290,8 +225,6 @@ class OnlineEnvironmentManager:
                     conf_info += f"(λ={self.confidence_kwargs.get('confidence_lambda', 40)})"
                 elif self.confidence_type == 'stepped':
                     conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.3)}, max_pos={self.confidence_kwargs.get('max_position', horizon//2)})"
-                elif self.confidence_type in ['adaptive', 'reverse_adaptive']:
-                    conf_info += f"(dynamic)"
                     
                 print(f"Batch: Env {env_idx}: Context={data['context_size']}, Confidence={confidence:.3f} ({conf_info}), Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, Loss={total_loss:.4f}, BatchSize={batch_size}")
                 
@@ -576,58 +509,57 @@ if __name__ == '__main__':
         os.makedirs('models', exist_ok=True)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
+    common_args.add_dataset_args(parser)
+    common_args.add_model_args(parser)
+    common_args.add_train_args(parser)
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--samples_per_iter', type=int, default=64, help='Number of samples to generate per iteration')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode with detailed step-by-step logging')
+    
+    # Confidence function arguments
+    parser.add_argument('--confidence_type', type=str, default='linear', 
+                       choices=['linear', 'exponential', 'stepped', 'constant'],
+                       help='Type of confidence function to use')
+    parser.add_argument('--confidence_start', type=float, default=0.3, 
+                       help='Starting confidence value for linear and stepped functions')
+    parser.add_argument('--confidence_lambda', type=float, default=40, 
+                       help='Lambda parameter for exponential confidence schedule: 1 - exp(-t/lambda)')
+    parser.add_argument('--max_position', type=int, default=-1,
+                       help='Maximum position for stepped confidence (default: horizon/2)')
+    parser.add_argument('--confidence_value', type=float, default=1.0,
+                       help='Constant confidence value for constant confidence type')
 
     args = vars(parser.parse_args())
-
-    # Load config from YAML file
-    with open(args['config'], 'r') as f:
-        config_args = yaml.safe_load(f)
-
-    # Use config values as args
-    args = config_args
-
     print("Args: ", args)
 
-    # Determine experiment identifier (job ID or timestamp)
-    job_id = os.environ.get('SLURM_JOB_ID')
-    if job_id:
-        experiment_id = job_id
-    else:
-        experiment_id = str(int(time.time()))
-
-    print(f"Experiment ID: {experiment_id}")
-
     env = args['env']
-    n_envs = args.get('envs', 100)
-    n_hists = args.get('hists', 1)
-    n_samples = args.get('samples', 1)
-    horizon = args.get('H', 100)
-    dim = args.get('dim', 10)
+    n_envs = args['envs']
+    n_hists = args['hists']
+    n_samples = args['samples']
+    horizon = args['H']
+    dim = args['dim']
     state_dim = dim
     action_dim = dim
-    n_embd = args.get('embd', 32)
-    n_head = args.get('head', 1)
-    n_layer = args.get('layer', 3)
-    lr = args.get('lr', 1e-3)
-    shuffle = args.get('shuffle', False)
-    dropout = args.get('dropout', 0)
-    var = args.get('var', 0.0)
-    cov = args.get('cov', 0.0)
-    num_epochs = args.get('n_epoch', 100)  # Online uses n_epoch
-    seed = args.get('seed', 0)
-    lin_d = args.get('lin_d', 2)  # Only needed for linear_bandit
-    samples_per_iter = args.get('samples_per_iter', 64)
-    debug_mode = args.get('debug', False)
-
+    n_embd = args['embd']
+    n_head = args['head']
+    n_layer = args['layer']
+    lr = args['lr']
+    shuffle = args['shuffle']
+    dropout = args['dropout']
+    var = args['var']
+    cov = args['cov']
+    num_epochs = args['num_epochs']
+    seed = args['seed']
+    lin_d = args['lin_d']
+    samples_per_iter = args['samples_per_iter']
+    debug_mode = args['debug']
+    
     # Confidence function parameters
-    confidence_type = args.get('confidence_type', 'linear')
-    confidence_start = args.get('confidence_start', 0.3)
-    confidence_lambda = args.get('confidence_lambda', 40)
-    max_position = args.get('max_position', horizon // 2)
-    if max_position <= 0:
-        max_position = horizon // 2
-    confidence_value = args.get('confidence_value', 1.0)
+    confidence_type = args['confidence_type']
+    confidence_start = args['confidence_start']
+    confidence_lambda = args['confidence_lambda']
+    max_position = args['max_position'] if args['max_position'] > 0 else horizon // 2
+    confidence_value = args['confidence_value']
 
     tmp_seed = seed
     if seed == -1:
@@ -757,17 +689,8 @@ if __name__ == '__main__':
         filename_suffix += f"_val{confidence_value}"
     
     filename = filename.replace('.pt', f'{filename_suffix}.pt')
-
-    # Create experiment directory structure
-    experiment_dir = f'models/{env}/{experiment_id}'
-    os.makedirs(experiment_dir, exist_ok=True)
-
-    # Save config file in experiment directory
-    config_path = f'{experiment_dir}/config.yaml'
-    with open(config_path, 'w') as f:
-        yaml.dump(args, f, default_flow_style=False)
-
-    log_filename = f'{experiment_dir}/logs.txt'
+    
+    log_filename = f'figs/loss/{filename}_online_unified_logs.txt'
     with open(log_filename, 'w') as f:
         pass
     def printw(string):
@@ -851,9 +774,7 @@ if __name__ == '__main__':
                     conf_info += f"(λ={confidence_lambda})"
                 elif confidence_type == 'stepped':
                     conf_info += f"(max_pos={max_position})"
-                elif confidence_type in ['adaptive', 'reverse_adaptive']:
-                    conf_info += f"(dynamic)"
-                printw(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f} ({conf_info})")
+                print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f} ({conf_info})", end='\r')
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()
@@ -864,7 +785,7 @@ if __name__ == '__main__':
 
         # Checkpointing
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
-            torch.save(model.state_dict(), f'{experiment_dir}/epoch{epoch+1}.pt')
+            torch.save(model.state_dict(), f'models/{filename}_online_unified_epoch{epoch+1}.pt')
 
         # Plotting
         if (epoch + 1) % 1 == 0:
@@ -893,8 +814,8 @@ if __name__ == '__main__':
             plt.ylim(0, 1)
             
             plt.tight_layout()
-            plt.savefig(f"{experiment_dir}/train_loss.png")
+            plt.savefig(f"figs/loss/{filename}_online_unified_train_loss.png")
             plt.clf()
 
-    torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
+    torch.save(model.state_dict(), f'models/{filename}_online_unified.pt')
     printw("Online training with unified confidence completed!")

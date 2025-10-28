@@ -14,7 +14,7 @@ from envs.darkroom_env import (
 )
 from utils import convert_to_tensor
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
 
 def deploy_online_vec(vec_env, controller, Heps, H, horizon):

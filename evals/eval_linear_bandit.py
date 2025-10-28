@@ -16,7 +16,7 @@ from ctrls.ctrl_bandit import (
 from envs.bandit_env import BanditEnv, BanditEnvVec, LinearBanditEnv
 from utils import convert_to_tensor
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
 
 def deploy_online(env, controller, horizon):
