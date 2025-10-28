@@ -112,10 +112,7 @@ class Transformer(nn.Module):
         # Extract predictions from state positions (index 0) for actions and rewards
         pred_actions = self.predict_action(x[:, 0])  # [batch, seq_len, action_dim]
         pred_rewards = self.predict_reward(x[:, 0])  # [batch, seq_len, 1]
-        if self.test:
-            return pred_actions
-        else:
-            return pred_actions, pred_rewards
+        return pred_actions, pred_rewards
 
 
 class ImageTransformer(Transformer):

@@ -62,28 +62,32 @@ def deploy_online_vec(vec_env, controller, horizon, include_meta=False):
 
     context_states = np.zeros((num_envs, horizon, vec_env.dx))
     context_actions = np.zeros((num_envs, horizon, vec_env.du))
-    context_next_states = np.zeros((num_envs, horizon, vec_env.dx))
     context_rewards = np.zeros((num_envs, horizon, 1))
 
     cum_means = []
     print("Deplying online vectorized...")
+    
     for h in range(horizon):
+        # Prepare batch with context accumulated so far (only states, actions, rewards)
         batch = {
             'context_states': context_states[:, :h, :],
             'context_actions': context_actions[:, :h, :],
-            'context_next_states': context_next_states[:, :h, :],
             'context_rewards': context_rewards[:, :h, :],
         }
 
         controller.set_batch_numpy_vec(batch)
 
+        # Deploy uses reset() to get initial state and runs for 1 step only
         states_lnr, actions_lnr, next_states_lnr, rewards_lnr = vec_env.deploy(
             controller)
 
+        # Store the transition: (state, action, next_state, reward)
         context_states[:, h, :] = states_lnr
         context_actions[:, h, :] = actions_lnr
-        context_next_states[:, h, :] = next_states_lnr
-        context_rewards[:, h, :] = rewards_lnr[:,None]
+        context_rewards[:, h, :] = rewards_lnr[:, None]
+
+        # Debug logging
+        print(f"Step {h}: action={np.argmax(actions_lnr[0])}, context_states={context_states[0]}, context_actions={context_actions[0]}, context_rewards={context_rewards[0]}")
 
         mean = vec_env.get_arm_value(actions_lnr)
         cum_means.append(mean)
@@ -97,7 +101,6 @@ def deploy_online_vec(vec_env, controller, horizon, include_meta=False):
         meta = {
             'context_states': context_states,
             'context_actions': context_actions,
-            'context_next_states': context_next_states,
             'context_rewards': context_rewards,
         }
         return cum_means, meta
@@ -430,23 +433,29 @@ def policy_entropy_online(eval_trajs, model, n_eval, horizon, var, bandit_type, 
     
     context_states = torch.zeros((n_eval, horizon, tmp_env.dx)).float().to(device)
     context_actions = torch.zeros((n_eval, horizon, tmp_env.du)).float().to(device)
-    context_next_states = torch.zeros((n_eval, horizon, tmp_env.dx)).float().to(device)
     context_rewards = torch.zeros((n_eval, horizon, 1)).float().to(device)
     
     for h in range(horizon):
-        batch = {
-            'context_states': context_states[:, :h, :],
-            'context_actions': context_actions[:, :h, :],
-            'context_next_states': context_next_states[:, :h, :],
-            'context_rewards': context_rewards[:, :h, :],
-        }
+        # Prepare batch - handle empty context at h=0
+        if h == 0:
+            # Empty context, create single-element sequence with current state
+            batch = {
+                'context_states': torch.zeros((n_eval, 1, tmp_env.dx)).float().to(device),  # Initial state is [1]
+                'context_actions': torch.zeros((n_eval, 1, tmp_env.du)).float().to(device),
+                'context_rewards': torch.zeros((n_eval, 1, 1)).float().to(device),
+            }
+            batch['context_lengths'] = torch.tensor([1] * n_eval).long().to(device)
+        else:
+            batch = {
+                'context_states': context_states[:, :h, :],
+                'context_actions': context_actions[:, :h, :],
+                'context_rewards': context_rewards[:, :h, :],
+            }
+            batch['context_lengths'] = torch.tensor([h] * n_eval).long().to(device)
         
-        zeros = torch.zeros(n_eval, tmp_env.dx**2 + tmp_env.du + 1).float().to(device)
-        batch['zeros'] = zeros
-        states = torch.zeros((n_eval, tmp_env.dx)).float().to(device)
-        batch['query_states'] = states
-        
-        logits = model(batch).cpu().detach().numpy()
+        pred_actions, _ = model(batch)
+        # Extract predictions at the last position
+        logits = pred_actions[:, -1, :].cpu().detach().numpy()
         probs = scipy.special.softmax(logits, axis=-1)
         
         eps = 1e-10
@@ -468,7 +477,6 @@ def policy_entropy_online(eval_trajs, model, n_eval, horizon, var, bandit_type, 
             
             context_states[i, h, :] = convert_to_tensor(state)
             context_actions[i, h, :] = convert_to_tensor(action)
-            context_next_states[i, h, :] = convert_to_tensor(next_state)
             context_rewards[i, h, :] = convert_to_tensor(reward)
     
     all_entropies = np.array(all_entropies).T

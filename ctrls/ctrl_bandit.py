@@ -388,7 +388,6 @@ class BanditTransformerController(Controller):
         self.H = model.horizon
         self.sample = sample
         self.batch_size = batch_size
-        self.zeros = torch.zeros(batch_size, self.dx**2 + self.du + 1).float().to(device)
 
     def set_env(self, env):
         return
@@ -397,17 +396,37 @@ class BanditTransformerController(Controller):
         # Convert each element of the batch to a torch tensor
         new_batch = {}
         for key in batch.keys():
+            # Log shape before conversion
+            print(f"DEBUG set_batch: {key} shape (numpy): {batch[key].shape if isinstance(batch[key], np.ndarray) else 'not numpy'}")
             new_batch[key] = torch.tensor(batch[key]).float().to(device)
+            print(f"DEBUG set_batch: {key} shape (tensor): {new_batch[key].shape}")
         self.set_batch(new_batch)
 
     def act(self, x):
-        self.batch['zeros'] = self.zeros
+        # x is the current state
+        # Build proper batch for the new model structure
+        model_batch = {}
+        
+        # Get context from self.batch (which was set by set_batch)
+        context_len = self.batch['context_states'].shape[1] if 'context_states' in self.batch else 0
+        
+        if context_len == 0:
+            # Empty context - create single-element sequence
+            model_batch['context_states'] = torch.tensor(x)[None, None, :].float().to(device)
+            model_batch['context_actions'] = torch.zeros(1, 1, self.du).float().to(device)
+            model_batch['context_rewards'] = torch.zeros(1, 1, 1).float().to(device)
+            model_batch['context_lengths'] = torch.tensor([1]).long().to(device)
+            loss_pos = 0
+        else:
+            # Use existing context
+            model_batch['context_states'] = self.batch['context_states']
+            model_batch['context_actions'] = self.batch['context_actions']
+            model_batch['context_rewards'] = self.batch['context_rewards']
+            model_batch['context_lengths'] = torch.tensor([context_len]).long().to(device)
+            loss_pos = context_len - 1
 
-        states = torch.tensor(x)[None, :].float().to(device)
-        self.batch['query_states'] = states
-
-        a = self.model(self.batch)
-        a = a.cpu().detach().numpy()[0]
+        a, _ = self.model(model_batch)
+        a = a[0, loss_pos].cpu().detach().numpy()
 
         if self.sample:
             probs = scipy.special.softmax(a)
@@ -420,18 +439,64 @@ class BanditTransformerController(Controller):
         return a
 
     def act_numpy_vec(self, x):
-        self.batch['zeros'] = self.zeros
+        # x is the current state vector(s)
+        model_batch = {}
+        
+        # Get context from self.batch (which was set by set_batch)
+        context_len = self.batch['context_states'].shape[1] if 'context_states' in self.batch else 0
+        
+        if context_len == 0:
+            # Empty context - create single-element sequence
+            # x could be a single state or a list of states (from vectorized reset)
+            # Convert to numpy if needed
+            if not isinstance(x, np.ndarray):
+                x = np.array(x)
+            
+            # Check if x is already a batch or a single state
+            if x.ndim == 1:
+                # Single state, expand to batch
+                x_expanded = np.repeat(x[None, :], self.batch_size, axis=0)  # [batch_size, state_dim]
+            elif x.ndim == 2:
+                # Already batched
+                x_expanded = x  # [batch_size, state_dim]
+            else:
+                raise ValueError(f"Unexpected state shape: {x.shape}")
+            
+            # Convert to torch and add sequence dimension
+            model_batch['context_states'] = torch.from_numpy(x_expanded).unsqueeze(1).float().to(device)  # [batch_size, 1, state_dim]
+            model_batch['context_actions'] = torch.zeros(self.batch_size, 1, self.du).float().to(device)
+            model_batch['context_rewards'] = torch.zeros(self.batch_size, 1, 1).float().to(device)
+            model_batch['context_lengths'] = torch.tensor([1] * self.batch_size).long().to(device)
+            loss_positions = torch.zeros(self.batch_size, dtype=torch.long).to(device)
+        else:
+            # Use existing context
+            # Ensure batch dimensions match
+            model_batch['context_states'] = self.batch['context_states']
+            model_batch['context_actions'] = self.batch['context_actions']
+            model_batch['context_rewards'] = self.batch['context_rewards']
+            
+                # Print shape for debugging
+            print(f"DEBUG act_numpy_vec: context_states shape: {model_batch['context_states'].shape}, "
+                  f"context_actions shape: {model_batch['context_actions'].shape}, "
+                  f"context_rewards shape: {model_batch['context_rewards'].shape}")
+            
+            model_batch['context_lengths'] = torch.tensor([context_len] * self.batch_size).long().to(device)
+            loss_positions = torch.tensor([context_len - 1] * self.batch_size).long().to(device)
+        
+        # Print final batch shapes before model call
+        print(f"DEBUG before model call: context_states shape: {model_batch['context_states'].shape}, "
+              f"context_actions shape: {model_batch['context_actions'].shape}, "
+              f"context_rewards shape: {model_batch['context_rewards'].shape}")
 
-        states = torch.tensor(np.array(x))
-        if self.batch_size == 1:
-            states = states[None,:]
-        states = states.float().to(device)
-        self.batch['query_states'] = states
-
-        a = self.model(self.batch)
-        a = a.cpu().detach().numpy()
-        if self.batch_size == 1:
-            a = a[0]
+        a, _ = self.model(model_batch)
+        
+        # Extract predictions at the last position for each environment
+        actions_pred = torch.zeros(self.batch_size, self.du)
+        for i in range(self.batch_size):
+            pos = loss_positions[i].item()
+            actions_pred[i] = a[i, pos]
+        
+        a = actions_pred.cpu().detach().numpy()
 
         if self.sample:
             probs = scipy.special.softmax(a, axis=-1)
