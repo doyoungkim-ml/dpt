@@ -5,7 +5,7 @@ import torch
 
 from utils import convert_to_tensor
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
 
 class Dataset(torch.utils.data.Dataset):

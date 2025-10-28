@@ -4,7 +4,7 @@ import transformers
 transformers.set_seed(0)
 from transformers import GPT2Config, GPT2Model
 from IPython import embed
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
 class Transformer(nn.Module):
     """Transformer class."""

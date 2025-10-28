@@ -27,8 +27,7 @@ import numpy as np
 import scipy
 import time
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
 def extract_epoch_number(checkpoint_path):
     """Extract epoch number from checkpoint filename."""
@@ -155,7 +154,6 @@ if __name__ == '__main__':
     n_envs = args.get('envs', 100000)
     n_hists = args.get('hists', 1)
     n_samples = args.get('samples', 1)
-    H = args.get('H', 100)
     dim = args.get('dim', 10)
     state_dim = dim
     action_dim = dim
@@ -170,6 +168,7 @@ if __name__ == '__main__':
     test_cov = args.get('test_cov', -1.0)
     envname = args['env']
     horizon = args.get('hor', -1)
+    H = horizon
     n_eval = args.get('n_eval', 100)
     seed = args.get('seed', 0)
     lin_d = args.get('lin_d', 2)

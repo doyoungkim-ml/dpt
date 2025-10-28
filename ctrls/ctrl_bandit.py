@@ -5,7 +5,7 @@ import scipy
 import torch
 from IPython import embed
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
 
 class Controller:
@@ -371,7 +371,7 @@ class UCBPolicy(Controller):
 
         i = np.argmax(bounds, axis=-1)
         j = np.argmin(counts, axis=-1)
-        mask = (counts[np.arange(200), j] == 0)
+        mask = (counts[np.arange(self.batch_size), j] == 0)
         i[mask] = j[mask]
 
         a = np.zeros((self.batch_size, self.env.dim))

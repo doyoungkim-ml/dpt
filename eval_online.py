@@ -22,7 +22,7 @@ import scipy
 import time
 import random
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
 
 def generate_bandit_environments(n_eval, dim, var, bandit_type='uniform'):
