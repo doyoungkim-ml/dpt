@@ -7,7 +7,7 @@ import os
 import time
 from IPython import embed
 
-import matplotlib.pyplot as plt
+import wandb
 import torch
 from torchvision.transforms import transforms
 
@@ -482,7 +482,25 @@ if __name__ == '__main__':
     args = vars(parser.parse_args())
     print("Args: ", args)
 
+    # Determine experiment identifier (job ID or timestamp)
+    job_id = os.environ.get('SLURM_JOB_ID')
+    if job_id:
+        experiment_id = job_id
+    else:
+        experiment_id = str(int(time.time()))
+
+    print(f"Experiment ID: {experiment_id}")
+
     env = args['env']
+    
+    # Initialize wandb
+    wandb.init(
+        project="dpt-training-online-confidence",
+        name=f"{env}_{experiment_id}",
+        config=args,
+        id=experiment_id,
+        resume="allow",
+    )
     n_envs = args['envs']
     n_hists = args['hists']
     n_samples = args['samples']
@@ -675,6 +693,14 @@ if __name__ == '__main__':
 
             if iteration % 10 == 0:
                 print(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Confidence: {confidence:.3f}", end='\r')
+                
+                # Log step-level metrics to wandb
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "iteration": iteration,
+                    "step_loss": iteration_loss,
+                    "confidence": confidence,
+                })
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()
@@ -682,40 +708,26 @@ if __name__ == '__main__':
         printw(f"\tTrain time: {end_time - start_time:.2f}s")
         printw(f"\tTotal iterations: {total_iterations}")
         printw(f"\tFinal confidence: {confidence:.3f}")
+        
+        # Log epoch-level metrics to wandb
+        wandb.log({
+            "epoch": epoch + 1,
+            "epoch_train_loss": train_loss[-1],
+            "epoch_train_time": end_time - start_time,
+            "total_iterations": total_iterations,
+            "final_confidence": confidence,
+        })
 
         # Checkpointing
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
             torch.save(model.state_dict(), f'models/{filename}_online_confidence_epoch{epoch+1}.pt')
 
-        # Plotting
+        # LOGGING TO WANDB
         if (epoch + 1) % 1 == 0:
             printw(f"Epoch: {epoch + 1}")
             printw(f"Train Loss: {train_loss[-1]:.6f}")
             printw("\n")
 
-            # Plot training loss
-            plt.figure(figsize=(12, 4))
-            
-            plt.subplot(1, 2, 1)
-            plt.yscale('log')
-            plt.plot(train_loss[1:], label="Train Loss")
-            plt.legend()
-            plt.title(f"Online Training Loss - {env} (Confidence)")
-            plt.xlabel("Epoch")
-            plt.ylabel("Loss")
-            
-            # Plot confidence schedule
-            plt.subplot(1, 2, 2)
-            plt.plot(confidence_schedule, label="Confidence Schedule")
-            plt.legend()
-            plt.title(f"Confidence Schedule - {env}")
-            plt.xlabel("Iteration")
-            plt.ylabel("Confidence")
-            plt.ylim(0, 1)
-            
-            plt.tight_layout()
-            plt.savefig(f"figs/loss/{filename}_online_confidence_train_loss.png")
-            plt.clf()
-
     torch.save(model.state_dict(), f'models/{filename}_online_confidence.pt')
+    wandb.finish()
     printw("Online training with confidence completed!")

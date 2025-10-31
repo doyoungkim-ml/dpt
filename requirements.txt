@@ -7,4 +7,5 @@ tqdm==4.64.1
 gym==0.23.1
 opencv-python==4.7.0.72
 matplotlib==3.6.2
+wandb
 packaging

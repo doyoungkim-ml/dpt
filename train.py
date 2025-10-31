@@ -15,7 +15,7 @@ import time
 import yaml
 from IPython import embed
 
-import matplotlib.pyplot as plt
+import wandb
 import torch
 from torchvision.transforms import transforms
 
@@ -72,6 +72,15 @@ if __name__ == '__main__':
     print(f"Experiment ID: {experiment_id}")
 
     env = args['env']
+    
+    # Initialize wandb
+    wandb.init(
+        project="dpt-training",
+        name=f"{env}_{experiment_id}",
+        config=args,
+        id=experiment_id,
+        resume="allow",
+    )
     n_envs = args.get('envs', 100000)
     n_hists = args.get('hists', 1)
     n_samples = args.get('samples', 1)
@@ -390,6 +399,13 @@ if __name__ == '__main__':
         end_time = time.time()
         printw(f"\tTest loss: {test_loss[-1]}")
         printw(f"\tEval time: {end_time - start_time}")
+        
+        # Log test metrics to wandb
+        wandb.log({
+            "epoch": resume_epoch_offset + epoch + 1,
+            "test_loss": test_loss[-1],
+            "eval_time": end_time - start_time,
+        })
 
 
         # TRAINING
@@ -416,6 +432,13 @@ if __name__ == '__main__':
         end_time = time.time()
         printw(f"\tTrain loss: {train_loss[-1]}")
         printw(f"\tTrain time: {end_time - start_time}")
+        
+        # Log training metrics to wandb
+        wandb.log({
+            "epoch": resume_epoch_offset + epoch + 1,
+            "train_loss": train_loss[-1],
+            "train_time": end_time - start_time,
+        })
 
 
         # LOGGING
@@ -423,19 +446,12 @@ if __name__ == '__main__':
             torch.save(model.state_dict(),
                        f'{experiment_dir}/epoch{resume_epoch_offset + epoch + 1}.pt')
 
-        # PLOTTING
+        # LOGGING TO WANDB
         if (epoch + 1) % 10 == 0:
             printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
             printw(f"Test Loss:        {test_loss[-1]}")
             printw(f"Train Loss:       {train_loss[-1]}")
             printw("\n")
-
-            plt.yscale('log')
-            plt.plot(train_loss[1:], label="Train Loss")
-            plt.plot(test_loss[1:], label="Test Loss")
-            plt.legend()
-            plt.savefig(f"{experiment_dir}/train_loss.png")
-            plt.clf()
 
             # Persist metrics for future resumes
             try:
@@ -448,4 +464,5 @@ if __name__ == '__main__':
                 printw(f"Warning: Failed to save metrics to {metrics_path}: {e}")
 
     torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
+    wandb.finish()
     print("Done.")

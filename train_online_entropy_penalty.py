@@ -8,7 +8,7 @@ import time
 import yaml
 from IPython import embed
 
-import matplotlib.pyplot as plt
+import wandb
 import torch
 from torchvision.transforms import transforms
 
@@ -695,6 +695,15 @@ if __name__ == '__main__':
     print(f"Experiment ID: {experiment_id}")
 
     env = args['env']
+    
+    # Initialize wandb
+    wandb.init(
+        project="dpt-training-online-entropy",
+        name=f"{env}_{experiment_id}",
+        config=args,
+        id=experiment_id,
+        resume="allow",
+    )
     n_envs = args.get('envs', 100)
     n_hists = args.get('hists', 1)
     n_samples = args.get('samples', 1)
@@ -1033,6 +1042,20 @@ if __name__ == '__main__':
                 # Get actual context length from first environment
                 actual_context_len = len(env_manager.contexts[0]['states']) if env_manager.contexts else 0
                 printw(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Beta: {beta:.3f} ({conf_info}) | Context={actual_context_len} | Times: fwd={fwd_time:.1f}ms, env={env_time:.1f}ms, train={train_time:.1f}ms, total={total_time:.1f}ms")
+                
+                # Log step-level metrics to wandb
+                if iteration % max(1, print_every) == 0:
+                    wandb.log({
+                        "epoch": resume_epoch_offset + epoch + 1,
+                        "iteration": iteration,
+                        "step_loss": iteration_loss,
+                        "beta": beta,
+                        "context_length": actual_context_len,
+                        "forward_time_ms": fwd_time,
+                        "env_time_ms": env_time,
+                        "train_time_ms": train_time,
+                        "total_time_ms": total_time,
+                    })
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()
@@ -1040,45 +1063,25 @@ if __name__ == '__main__':
         printw(f"\tTrain time: {end_time - start_time:.2f}s")
         printw(f"\tTotal iterations: {total_iterations}")
         printw(f"\tFinal beta: {beta:.3f}")
+        
+        # Log epoch-level metrics to wandb
+        wandb.log({
+            "epoch": resume_epoch_offset + epoch + 1,
+            "epoch_train_loss": train_loss[-1],
+            "epoch_train_time": end_time - start_time,
+            "total_iterations": total_iterations,
+            "final_beta": beta,
+        })
 
         # Checkpointing
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
             torch.save(model.state_dict(), f'{experiment_dir}/epoch{resume_epoch_offset + epoch + 1}.pt')
 
-        # Plotting
+        # LOGGING TO WANDB
         if (epoch + 1) % 1 == 0:
             printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
             printw(f"Train Loss: {train_loss[-1]:.6f}")
             printw("\n")
-
-            # Plot training loss
-            plt.figure(figsize=(12, 4))
-            
-            plt.subplot(1, 2, 1)
-            plt.yscale('log')
-            # Plot loss for every step, not every epoch
-            if len(step_losses) > 1:
-                plt.plot(step_losses, label="Train Loss")
-            plt.legend()
-            plt.title(f"Online Training Loss (Entropy Penalty) - {env} ({confidence_type.title()} Beta)")
-            plt.xlabel("Step")
-            plt.ylabel("Loss")
-            
-            # Plot beta schedule
-            plt.subplot(1, 2, 2)
-            if len(beta_schedule) > 0:
-                plt.plot(beta_schedule, label=f"Beta Schedule ({confidence_type})")
-            plt.legend()
-            plt.title(f"{confidence_type.title()} Beta Schedule - {env}")
-            plt.xlabel("Iteration")
-            plt.ylabel("Beta (Entropy Penalty Coefficient)")
-            # Adjust y-axis to fit all data
-            if len(beta_schedule) > 0:
-                plt.ylim(bottom=0)
-            
-            plt.tight_layout()
-            plt.savefig(f"{experiment_dir}/train_loss.png")
-            plt.clf()
 
             # Persist metrics so future resumes extend curves
             try:
@@ -1093,5 +1096,6 @@ if __name__ == '__main__':
                 printw(f"Warning: Failed to save metrics to {metrics_path}: {e}")
 
     torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
+    wandb.finish()
     printw("Online training with entropy penalty completed!")
 
