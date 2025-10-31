@@ -32,7 +32,7 @@ class Transformer(nn.Module):
             resid_pdrop=self.dropout,
             embd_pdrop=self.dropout,
             attn_pdrop=self.dropout,
-            use_cache=True,  # Enable caching for inference
+            use_cache=False,  # Disable caching
             # Note: Gradient checkpointing not available in GPT2Model
         )
         self.transformer = GPT2Model(config)
@@ -94,7 +94,7 @@ class Transformer(nn.Module):
             inputs_embeds=stacked_inputs,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            use_cache=self.test if past_key_values is None else True,
+            use_cache=False,
         )
         
         hidden_state = transformer_outputs['last_hidden_state']
@@ -188,7 +188,7 @@ class ImageTransformer(Transformer):
         ).permute(0, 2, 1, 3).reshape(batch_size, 3 * seq_len, self.n_embd)
         
         stacked_inputs = self.embed_ln(stacked_inputs)
-
+        
         # Create attention mask for variable-length sequences
         attention_mask = None
         if 'context_lengths' in x:
@@ -198,12 +198,12 @@ class ImageTransformer(Transformer):
             for i in range(batch_size):
                 actual_len = context_lengths[i].item()
                 attention_mask[i, :(3 * actual_len)] = 1.0
-
+        
         transformer_outputs = self.transformer(
             inputs_embeds=stacked_inputs,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            use_cache=self.test if past_key_values is None else True,
+            use_cache=False,
         )
         
         hidden_state = transformer_outputs['last_hidden_state']
