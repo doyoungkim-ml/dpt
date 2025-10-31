@@ -231,6 +231,9 @@ if __name__ == '__main__':
     else:
         model = Transformer(config).to(device)
 
+    # Watch model for gradient and parameter tracking
+    wandb.watch(model, log='all', log_freq=100)
+
     params = {
         'batch_size': 64,
         'shuffle': True,

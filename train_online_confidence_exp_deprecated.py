@@ -626,6 +626,9 @@ if __name__ == '__main__':
     else:
         model = Transformer(config).to(device)
 
+    # Watch model for gradient and parameter tracking
+    wandb.watch(model, log='all', log_freq=100)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
 
