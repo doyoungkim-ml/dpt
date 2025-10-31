@@ -33,6 +33,7 @@ class Transformer(nn.Module):
             embd_pdrop=self.dropout,
             attn_pdrop=self.dropout,
             use_cache=True,  # Enable caching for inference
+            # Note: Gradient checkpointing not available in GPT2Model
         )
         self.transformer = GPT2Model(config)
         

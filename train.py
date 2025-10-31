@@ -47,15 +47,18 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
+    parser.add_argument('--checkpoint_dir', type=str, default=None, help='Directory containing checkpoints to resume from')
 
-    args = vars(parser.parse_args())
+    cli_args = vars(parser.parse_args())
 
     # Load config from YAML file
-    with open(args['config'], 'r') as f:
+    with open(cli_args['config'], 'r') as f:
         config_args = yaml.safe_load(f)
 
-    # Use config values as args
+    # Use config values as args and merge CLI-only overrides
     args = config_args
+    if cli_args.get('checkpoint_dir') is not None:
+        args['checkpoint_dir'] = cli_args['checkpoint_dir']
 
     print("Args: ", args)
 
@@ -224,18 +227,28 @@ if __name__ == '__main__':
         'shuffle': True,
     }
 
-    # Create experiment directory structure
-    experiment_dir = f'models/{env}/{experiment_id}'
-    os.makedirs(experiment_dir, exist_ok=True)
+    # Create or reuse experiment directory structure
+    checkpoint_dir = args.get('checkpoint_dir')
+    if checkpoint_dir is not None and os.path.isdir(checkpoint_dir):
+        experiment_dir = checkpoint_dir
+    else:
+        experiment_dir = f'models/{env}/{experiment_id}'
+        os.makedirs(experiment_dir, exist_ok=True)
 
-    # Save config file in experiment directory
+    # Save/Update config file in experiment directory (overwrite to reflect resume info)
     config_path = f'{experiment_dir}/config.yaml'
     with open(config_path, 'w') as f:
         yaml.dump(args, f, default_flow_style=False)
 
     log_filename = f'{experiment_dir}/logs.txt'
-    with open(log_filename, 'w') as f:
-        pass
+    if checkpoint_dir is None:
+        with open(log_filename, 'w') as f:
+            pass
+    else:
+        os.makedirs(experiment_dir, exist_ok=True)
+        if not os.path.exists(log_filename):
+            with open(log_filename, 'w') as f:
+                pass
     def printw(string):
         """
         A drop-in replacement for print that also writes to a log file.
@@ -279,18 +292,84 @@ if __name__ == '__main__':
     train_loader = torch.utils.data.DataLoader(train_dataset, **params)
     test_loader = torch.utils.data.DataLoader(test_dataset, **params)
 
+    # Resume model weights if checkpoint_dir provided; also compute epoch offset
+    def _find_latest_checkpoint(directory):
+        epoch_ckpts = []
+        try:
+            for fn in os.listdir(directory):
+                if fn.startswith('epoch') and fn.endswith('.pt'):
+                    num_str = fn[len('epoch'):-3]
+                    if num_str.isdigit():
+                        epoch_ckpts.append((int(num_str), os.path.join(directory, fn)))
+        except FileNotFoundError:
+            return None
+        if epoch_ckpts:
+            epoch_ckpts.sort(key=lambda x: x[0])
+            return epoch_ckpts[-1][1]
+        final_path = os.path.join(directory, 'final_model.pt')
+        return final_path if os.path.exists(final_path) else None
+
+    def _get_existing_max_epoch(directory):
+        max_epoch = 0
+        try:
+            for fn in os.listdir(directory):
+                if fn.startswith('epoch') and fn.endswith('.pt'):
+                    num_str = fn[len('epoch'):-3]
+                    if num_str.isdigit():
+                        max_epoch = max(max_epoch, int(num_str))
+        except FileNotFoundError:
+            return 0
+        return max_epoch
+
+    resume_epoch_offset = 0
+    if checkpoint_dir is not None:
+        latest_ckpt = _find_latest_checkpoint(experiment_dir)
+        if latest_ckpt is not None:
+            state = torch.load(latest_ckpt, map_location=device)
+            model.load_state_dict(state)
+            printw(f"Resumed model weights from checkpoint: {latest_ckpt}")
+            resume_epoch_offset = _get_existing_max_epoch(experiment_dir)
+        else:
+            printw(f"No checkpoint found in {experiment_dir}; starting fresh.")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
 
     test_loss = []
     train_loss = []
 
+    # Metrics persistence to preserve curves across resumes
+    metrics_path = os.path.join(experiment_dir, 'metrics.npz')
+    if checkpoint_dir is not None and os.path.exists(metrics_path):
+        try:
+            loaded = np.load(metrics_path, allow_pickle=True)
+            train_loss = list(loaded.get('train_loss', np.array([])).tolist())
+            test_loss = list(loaded.get('test_loss', np.array([])).tolist())
+            printw(f"Loaded previous metrics from {metrics_path} (epochs={len(train_loss)})")
+        except Exception as e:
+            printw(f"Warning: Failed to load metrics from {metrics_path}: {e}")
+
     printw("Num train batches: " + str(len(train_loader)))
     printw("Num test batches: " + str(len(test_loader)))
 
-    for epoch in range(num_epochs):
+    # Limit to remaining epochs if resuming
+    remaining_epochs = max(0, num_epochs - resume_epoch_offset)
+    # Update config.yaml with resume metadata
+    try:
+        with open(config_path, 'w') as f:
+            merged = dict(args)
+            merged.update({
+                'resume': checkpoint_dir is not None,
+                'resumed_from_epoch': int(resume_epoch_offset),
+                'remaining_epochs': int(remaining_epochs),
+            })
+            yaml.dump(merged, f, default_flow_style=False)
+    except Exception:
+        pass
+
+    for epoch in range(remaining_epochs):
         # EVALUATION
-        printw(f"Epoch: {epoch + 1}")
+        printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
         start_time = time.time()
         with torch.no_grad():
             epoch_test_loss = 0.0
@@ -342,11 +421,11 @@ if __name__ == '__main__':
         # LOGGING
         if (epoch + 1) % 50 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
             torch.save(model.state_dict(),
-                       f'{experiment_dir}/epoch{epoch+1}.pt')
+                       f'{experiment_dir}/epoch{resume_epoch_offset + epoch + 1}.pt')
 
         # PLOTTING
         if (epoch + 1) % 10 == 0:
-            printw(f"Epoch: {epoch + 1}")
+            printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
             printw(f"Test Loss:        {test_loss[-1]}")
             printw(f"Train Loss:       {train_loss[-1]}")
             printw("\n")
@@ -357,6 +436,16 @@ if __name__ == '__main__':
             plt.legend()
             plt.savefig(f"{experiment_dir}/train_loss.png")
             plt.clf()
+
+            # Persist metrics for future resumes
+            try:
+                np.savez_compressed(
+                    metrics_path,
+                    train_loss=np.array(train_loss),
+                    test_loss=np.array(test_loss),
+                )
+            except Exception as e:
+                printw(f"Warning: Failed to save metrics to {metrics_path}: {e}")
 
     torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
     print("Done.")

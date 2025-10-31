@@ -413,7 +413,7 @@ if __name__ == '__main__':
             plt.close()
 
             # Graph results - need to collect regret data across horizons
-            horizons = np.linspace(1, horizon, 50, dtype=int)
+            horizons = np.unique(np.linspace(1, horizon, 50, dtype=int))
             regret_data = {}
             regret_sem_data = {}
             for h in horizons:
@@ -534,7 +534,7 @@ if __name__ == '__main__':
             plt.close()
 
             # Graph results
-            horizons = np.linspace(1, horizon, 50, dtype=int)
+            horizons = np.unique(np.linspace(1, horizon, 50, dtype=int))
             regret_data = {}
             regret_sem_data = {}
             for h in horizons:

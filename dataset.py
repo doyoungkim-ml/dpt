@@ -36,7 +36,9 @@ class Dataset(torch.utils.data.Dataset):
         for traj in self.trajs:
             context_states.append(traj['context_states'])
             context_actions.append(traj['context_actions'])
-            context_next_states.append(traj['context_next_states'])
+            # context_next_states is optional (not used by transformer model)
+            if 'context_next_states' in traj:
+                context_next_states.append(traj['context_next_states'])
             context_rewards.append(traj['context_rewards'])
 
             query_states.append(traj['query_state'])
@@ -44,7 +46,10 @@ class Dataset(torch.utils.data.Dataset):
 
         context_states = np.array(context_states)
         context_actions = np.array(context_actions)
-        context_next_states = np.array(context_next_states)
+        if len(context_next_states) > 0:
+            context_next_states = np.array(context_next_states)
+        else:
+            context_next_states = None
         context_rewards = np.array(context_rewards)
         if len(context_rewards.shape) < 3:
             context_rewards = context_rewards[:, :, None]
@@ -56,9 +61,13 @@ class Dataset(torch.utils.data.Dataset):
             'optimal_actions': convert_to_tensor(optimal_actions, store_gpu=self.store_gpu),
             'context_states': convert_to_tensor(context_states, store_gpu=self.store_gpu),
             'context_actions': convert_to_tensor(context_actions, store_gpu=self.store_gpu),
-            'context_next_states': convert_to_tensor(context_next_states, store_gpu=self.store_gpu),
             'context_rewards': convert_to_tensor(context_rewards, store_gpu=self.store_gpu),
         }
+        
+        if context_next_states is not None:
+            self.dataset['context_next_states'] = convert_to_tensor(context_next_states, store_gpu=self.store_gpu)
+        else:
+            self.dataset['context_next_states'] = None
 
         self.zeros = np.zeros(
             config['state_dim'] ** 2 + config['action_dim'] + 1
@@ -74,19 +83,22 @@ class Dataset(torch.utils.data.Dataset):
         res = {
             'context_states': self.dataset['context_states'][index],
             'context_actions': self.dataset['context_actions'][index],
-            'context_next_states': self.dataset['context_next_states'][index],
             'context_rewards': self.dataset['context_rewards'][index],
             'query_states': self.dataset['query_states'][index],
             'optimal_actions': self.dataset['optimal_actions'][index],
             'zeros': self.zeros,
         }
+        
+        if self.dataset['context_next_states'] is not None:
+            res['context_next_states'] = self.dataset['context_next_states'][index]
 
         if self.shuffle:
             perm = torch.randperm(self.horizon)
             res['context_states'] = res['context_states'][perm]
             res['context_actions'] = res['context_actions'][perm]
-            res['context_next_states'] = res['context_next_states'][perm]
             res['context_rewards'] = res['context_rewards'][perm]
+            if 'context_next_states' in res:
+                res['context_next_states'] = res['context_next_states'][perm]
 
         return res
 
@@ -126,20 +138,23 @@ class ImageDataset(Dataset):
             'context_images': context_images,#.to(device),
             'context_states': self.dataset['context_states'][index],
             'context_actions': self.dataset['context_actions'][index],
-            'context_next_states': self.dataset['context_next_states'][index],
             'context_rewards': self.dataset['context_rewards'][index],
             'query_images': query_images,#.to(device),
             'query_states': self.dataset['query_states'][index],
             'optimal_actions': self.dataset['optimal_actions'][index],
             'zeros': self.zeros,
         }
+        
+        if self.dataset['context_next_states'] is not None:
+            res['context_next_states'] = self.dataset['context_next_states'][index]
 
         if self.shuffle:
             perm = torch.randperm(self.horizon)
             res['context_images'] = res['context_images'][perm]
             res['context_states'] = res['context_states'][perm]
             res['context_actions'] = res['context_actions'][perm]
-            res['context_next_states'] = res['context_next_states'][perm]
             res['context_rewards'] = res['context_rewards'][perm]
+            if 'context_next_states' in res:
+                res['context_next_states'] = res['context_next_states'][perm]
 
         return res

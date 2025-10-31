@@ -24,7 +24,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.ba
 def deploy_online(env, controller, horizon):
     context_states = torch.zeros((1, horizon, env.dx)).float().to(device)
     context_actions = torch.zeros((1, horizon, env.du)).float().to(device)
-    context_next_states = torch.zeros((1, horizon, env.dx)).float().to(device)
     context_rewards = torch.zeros((1, horizon, 1)).float().to(device)
 
     cum_means = []
@@ -32,7 +31,6 @@ def deploy_online(env, controller, horizon):
         batch = {
             'context_states': context_states[:, :h, :],
             'context_actions': context_actions[:, :h, :],
-            'context_next_states': context_next_states[:, :h, :],
             'context_rewards': context_rewards[:, :h, :],
         }
 
@@ -42,7 +40,6 @@ def deploy_online(env, controller, horizon):
 
         context_states[0, h, :] = convert_to_tensor(states_lnr[0])
         context_actions[0, h, :] = convert_to_tensor(actions_lnr[0])
-        context_next_states[0, h, :] = convert_to_tensor(next_states_lnr[0])
         context_rewards[0, h, :] = convert_to_tensor(rewards_lnr[0])
 
         actions = actions_lnr.flatten()
@@ -87,11 +84,13 @@ def deploy_online_vec(vec_env, controller, horizon, include_meta=False):
         context_rewards[:, h, :] = rewards_lnr[:, None]
 
         # Debug logging
-        print(f"Step {h}: action={np.argmax(actions_lnr[0])}, context_states={context_states[0]}, context_actions={context_actions[0]}, context_rewards={context_rewards[0]}")
+
 
         mean = vec_env.get_arm_value(actions_lnr)
         cum_means.append(mean)
-
+    if controller.__class__.__name__ == 'BanditTransformerController':
+        for i in range(1):
+            print(f"env {i}: opt_action={vec_env.envs[i].opt_a}, context_actions={context_actions[i]}, context_rewards={context_rewards[i]}") 
     print("Deplyed online vectorized")
     
     cum_means = np.array(cum_means)
@@ -227,7 +226,6 @@ def offline(eval_trajs, model, n_eval, horizon, var, bandit_type):
     tmp_env = BanditEnv(eval_trajs[0]['means'], horizon, var=var)
     context_states = np.zeros((num_envs, horizon, tmp_env.dx))
     context_actions = np.zeros((num_envs, horizon, tmp_env.du))
-    context_next_states = np.zeros((num_envs, horizon, tmp_env.dx))
     context_rewards = np.zeros((num_envs, horizon, 1))
 
 
@@ -246,7 +244,6 @@ def offline(eval_trajs, model, n_eval, horizon, var, bandit_type):
 
         context_states[i_eval, :, :] = traj['context_states'][:horizon]
         context_actions[i_eval, :, :] = traj['context_actions'][:horizon]
-        context_next_states[i_eval, :, :] = traj['context_next_states'][:horizon]
         context_rewards[i_eval, :, :] = traj['context_rewards'][:horizon,None]
 
 
@@ -254,7 +251,6 @@ def offline(eval_trajs, model, n_eval, horizon, var, bandit_type):
     batch = {
         'context_states': context_states,
         'context_actions': context_actions,
-        'context_next_states': context_next_states,
         'context_rewards': context_rewards,
     }
 
@@ -305,7 +301,7 @@ def offline(eval_trajs, model, n_eval, horizon, var, bandit_type):
 
 
 def offline_graph(eval_trajs, model, n_eval, horizon, var, bandit_type):
-    horizons = np.linspace(1, horizon, 50, dtype=int)
+    horizons = np.unique(np.linspace(1, horizon, 50, dtype=int))
 
     all_means = []
     all_sems = []
@@ -345,7 +341,6 @@ def policy_entropy(eval_trajs, model, n_eval, horizon, var, bandit_type):
     tmp_env = BanditEnv(eval_trajs[0]['means'], horizon, var=var)
     context_states = np.zeros((num_envs, horizon, tmp_env.dx))
     context_actions = np.zeros((num_envs, horizon, tmp_env.du))
-    context_next_states = np.zeros((num_envs, horizon, tmp_env.dx))
     context_rewards = np.zeros((num_envs, horizon, 1))
 
     envs = []
@@ -362,7 +357,6 @@ def policy_entropy(eval_trajs, model, n_eval, horizon, var, bandit_type):
 
         context_states[i_eval, :, :] = traj['context_states'][:horizon]
         context_actions[i_eval, :, :] = traj['context_actions'][:horizon]
-        context_next_states[i_eval, :, :] = traj['context_next_states'][:horizon]
         context_rewards[i_eval, :, :] = traj['context_rewards'][:horizon,None]
 
     optimal_actions = np.array(optimal_actions)
@@ -370,7 +364,6 @@ def policy_entropy(eval_trajs, model, n_eval, horizon, var, bandit_type):
     batch = {
         'context_states': torch.tensor(context_states).float().to(device),
         'context_actions': torch.tensor(context_actions).float().to(device),
-        'context_next_states': torch.tensor(context_next_states).float().to(device),
         'context_rewards': torch.tensor(context_rewards).float().to(device),
     }
 

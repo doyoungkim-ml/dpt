@@ -163,7 +163,7 @@ def generate_bandit_histories_from_envs(envs, n_hists, n_samples, cov, type):
             (
                 context_states,
                 context_actions,
-                context_next_states,
+                _,
                 context_rewards,
             ) = rollin_bandit(env, cov=cov)
             for k in range(n_samples):
@@ -175,7 +175,6 @@ def generate_bandit_histories_from_envs(envs, n_hists, n_samples, cov, type):
                     'optimal_action': optimal_action,
                     'context_states': context_states,
                     'context_actions': context_actions,
-                    'context_next_states': context_next_states,
                     'context_rewards': context_rewards,
                     'means': env.means,
                 }
@@ -235,20 +234,20 @@ def generate_linear_bandit_histories(n_envs, dim, lin_d, horizon, var, **kwargs)
             for _ in range(n_envs)]
 
     data_type = kwargs['data_type']
+    n_hists = kwargs.get('hists', 1)
+    n_samples = kwargs.get('samples', 1)
 
     print("Generating histories...")
     if data_type=='thompson':
-        context_states_all, context_actions_all, context_next_states_all, context_rewards_all = [], [], [], []
+        context_states_all, context_actions_all, context_rewards_all = [], [], []
         for j in range(n_hists):
-            context_states, context_actions, context_next_states, context_rewards = rollin_linear_bandit_vec(envs)
+            context_states, context_actions, _, context_rewards = rollin_linear_bandit_vec(envs)
 
             context_states_all.append(context_states)
             context_actions_all.append(context_actions)
-            context_next_states_all.append(context_next_states)
             context_rewards_all.append(context_rewards)
         context_states_all = np.stack(context_states_all, axis=1)
         context_actions_all = np.stack(context_actions_all, axis=1)
-        context_next_states_all = np.stack(context_next_states_all, axis=1)
         context_rewards_all = np.stack(context_rewards_all, axis=1)
 
 
@@ -257,11 +256,10 @@ def generate_linear_bandit_histories(n_envs, dim, lin_d, horizon, var, **kwargs)
         print('Generating linear bandit histories for env {}/{}'.format(i+1, n_envs))
         for j in range(n_hists):
             if data_type=='uniform':
-                context_states, context_actions, context_next_states, context_rewards = rollin_bandit(env, cov=0.0)
+                context_states, context_actions, _, context_rewards = rollin_bandit(env, cov=0.0)
             elif data_type=='thompson':
                 context_states = context_states_all[i, j]
                 context_actions = context_actions_all[i, j]
-                context_next_states = context_next_states_all[i, j]
                 context_rewards = context_rewards_all[i, j]
             else:
                 raise ValueError("Invalid data type")
@@ -274,7 +272,6 @@ def generate_linear_bandit_histories(n_envs, dim, lin_d, horizon, var, **kwargs)
                     'optimal_action': optimal_action,
                     'context_states': context_states,
                     'context_actions': context_actions,
-                    'context_next_states': context_next_states,
                     'context_rewards': context_rewards,
                     'means': env.means,
                     'arms': arms,

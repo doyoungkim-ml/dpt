@@ -129,6 +129,8 @@ class OnlineEnvironmentManager:
         self.confidence_type = confidence_type
         self.confidence_kwargs = kwargs
         self.kwargs = kwargs
+        # Set max context length to avoid quadratic scaling (default 1024)
+        self.max_context_length = kwargs.get('max_context_length', 1024)
         self.reset_contexts()
 
     def reset_contexts(self):
@@ -138,12 +140,25 @@ class OnlineEnvironmentManager:
             'actions': [],
             'rewards': []
         } for i in range(len(self.envs))}
+        # Reset KV cache for incremental decoding
+        self.past_key_values = {i: None for i in range(len(self.envs))}
 
     def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, current_iteration, debug=False):
-        """Step environments and learn using cross-entropy loss minus beta-weighted entropy penalty."""
+        """Step environments and learn using a single forward pass per iteration.
+
+        Optimization changes:
+        - Append current state to contexts BEFORE the model forward so the same forward is reused
+          for both action sampling and loss computation.
+        - Remove the separate inference-only forward to cut compute roughly in half.
+        - Minimize NumPy↔Torch conversions in the hot path.
+        - Make logging/timing lighter.
+        """
+        total_start = time.time()
+        timings = {}
+        
         debug_info = {'env_steps': []} if debug else None
         
-        # PHASE 1: Collect data from all environments
+        # PHASE 1: Collect data and append current state to contexts
         env_data = []
         for env_idx in range(len(self.envs)):
             env = self.envs[env_idx]
@@ -154,156 +169,69 @@ class OnlineEnvironmentManager:
             elif self.env_type.startswith('darkroom'):
                 current_state = env.sample_state()
             elif self.env_type == 'miniworld':
-                # For miniworld, place agent at random position
                 init_pos, init_dir = rand_pos_and_dir(env)
                 env.place_agent(pos=init_pos, dir=init_dir)
                 current_state = env.agent.dir_vec[[0, -1]]
 
-            # DEBUG: Current context info (BEFORE adding new transition)
             context_size = len(self.contexts[env_idx]['states']) if debug else 0
             recent_rewards = self.contexts[env_idx]['rewards'][-3:] if debug and self.contexts[env_idx]['rewards'] else []
-                
-            # Store data for batched processing
+
+            # Append current state with placeholder action/reward; will fill after env step
+            self.contexts[env_idx]['states'].append(current_state)
+            # Placeholder one-hot action of correct dimension
+            if self.env_type == 'miniworld':
+                action_dim_local = self.envs[env_idx].action_space.n
+            elif self.env_type in ['bandit', 'linear_bandit']:
+                action_dim_local = self.envs[env_idx].dim
+            else:
+                action_dim_local = action_dim
+            self.contexts[env_idx]['actions'].append(np.zeros(action_dim_local))
+            self.contexts[env_idx]['rewards'].append(0.0)
+
+            # Truncate context if exceeding cap
+            if len(self.contexts[env_idx]['states']) > self.max_context_length:
+                for key in self.contexts[env_idx]:
+                    self.contexts[env_idx][key] = self.contexts[env_idx][key][-self.max_context_length:]
+
             env_data.append({
                 'env_idx': env_idx,
                 'env': env,
                 'current_state': current_state,
-                'model_action': None,  # Will be filled by batched prediction
-                'reward': None,  # Will be filled after action execution
-                'next_state': None,  # Will be filled after action execution
+                'model_action': None,
+                'reward': None,
+                'next_state': None,
                 'context_size': context_size,
                 'recent_rewards': recent_rewards
             })
 
-        # PHASE 1B: Batched action prediction for all environments at once
-        if self.model is not None:
-            # Create input samples for all environments
-            inference_samples = []
-            for data in env_data:
-                sample = self._create_model_input_sample(data['env_idx'], data['current_state'])
-                
-                # Add dummy optimal action to make it compatible with batch_to_tensors
-                if self.env_type in ['bandit', 'linear_bandit']:
-                    sample['optimal_action'] = np.zeros(data['env'].dim)  # dummy
-                elif self.env_type.startswith('darkroom'):
-                    sample['optimal_action'] = np.zeros(5)  # dummy
-                elif self.env_type == 'miniworld':
-                    sample['optimal_action'] = np.zeros(data['env'].action_space.n)  # dummy
-                
-                inference_samples.append(sample)
-            
-            # Batch inference: single forward pass for all environments
-            with torch.no_grad():
-                if self.env_type == 'miniworld':
-                    inference_batch = batch_to_tensors(inference_samples, self.config, self.env_type, self.kwargs.get('transform'))
-                else:
-                    inference_batch = batch_to_tensors(inference_samples, self.config, self.env_type)
-                
-                inference_batch = {k: v.to(device) for k, v in inference_batch.items()}
-                
-                self.model.eval()
-                model_outputs = self.model(inference_batch)
-                pred_actions = model_outputs[0]
-                self.model.train()
-            
-            # Extract actions for each environment
-            for i, data in enumerate(env_data):
-                env_idx = data['env_idx']
-                context_len = len(self.contexts[env_idx]['states'])
-                sample_pos = min(context_len, pred_actions.shape[1] - 1)
-                
-                # Sample action from predicted distribution
-                if self.env_type == 'miniworld':
-                    probs = torch.softmax(pred_actions[i, sample_pos], dim=-1)
-                    action_idx = torch.multinomial(probs, 1).item()
-                    action = np.zeros(data['env'].action_space.n)
-                    action[action_idx] = 1.0
-                else:
-                    probs = torch.softmax(pred_actions[i, sample_pos], dim=-1)
-                    action_idx = torch.multinomial(probs, 1).item()
-                    action = np.zeros(len(probs))
-                    action[action_idx] = 1.0
-                
-                data['model_action'] = action
-        else:
-            # Fallback to random actions
-            for data in env_data:
-                data['model_action'] = self._get_random_action(data['env'])
-        
-        # PHASE 1C: Execute actions in environments
-        for data in env_data:
-            env = data['env']
-            current_state = data['current_state']
-            model_action = data['model_action']
-            
-            # Execute action in environment
-            if self.env_type in ['bandit', 'linear_bandit']:
-                next_state, reward = env.transit(current_state, model_action)
-            elif self.env_type.startswith('darkroom'):
-                next_state, reward = env.transit(current_state, model_action)
-            elif self.env_type == 'miniworld':
-                # Convert one-hot to action index
-                action_idx = np.argmax(model_action)
-                _, reward, _, _, _ = env.step(action_idx)
-                next_state = env.agent.dir_vec[[0, -1]]
-            
-            data['reward'] = reward
-            data['next_state'] = next_state
-
-        # PHASE 2: Create batch of training samples
-        # NOTE: At this point, contexts contain past (s, a, r) tuples
-        # We'll add the current state to create the full sequence for prediction
-        for data in env_data:
-            # Add current state (query state) and dummy action/reward for prediction
-            self.contexts[data['env_idx']]['states'].append(data['current_state'])
-            self.contexts[data['env_idx']]['actions'].append(data['model_action'])  # Will be replaced with dummy
-            self.contexts[data['env_idx']]['rewards'].append(0.0)  # Dummy, will predict
-            
-            # Truncate if too long
-            if len(self.contexts[data['env_idx']]['states']) > self.horizon + 1:  # +1 for query state
-                for key in self.contexts[data['env_idx']]:
-                    self.contexts[data['env_idx']][key] = self.contexts[data['env_idx']][key][-(self.horizon + 1):]
-        
+        # PHASE 2: Build training samples (now include the just-appended current state)
         training_samples = []
         for data in env_data:
             training_sample = self._create_training_sample(data['env'], data['env_idx'], data['current_state'])
             training_samples.append(training_sample)
-        
-        # Now update contexts with real rewards (after training samples created)
-        for data in env_data:
-            # Update the last reward to be the actual reward
-            if len(self.contexts[data['env_idx']]['rewards']) > 0:
-                self.contexts[data['env_idx']]['rewards'][-1] = data['reward']
 
-        # PHASE 3: Batched forward and backward pass
+        # Single forward pass for action sampling AND loss
+        t_fwd_start = time.time()
         if self.env_type == 'miniworld':
             batch = batch_to_tensors(training_samples, self.config, self.env_type, self.kwargs.get('transform'))
         else:
             batch = batch_to_tensors(training_samples, self.config, self.env_type)
-
-        # Move to device
         batch = {k: v.to(device) for k, v in batch.items()}
 
-        # Forward pass for entire batch
-        true_actions = batch['optimal_actions']  # Shape: [batch_size, action_dim]
-        for key, value in batch.items():
-            #printw the first batch element of the value
-            printw(f"{key}: {value[0]}")
-        model_outputs = self.model(batch)        # Returns (pred_actions, pred_rewards)
-        pred_actions, pred_rewards = model_outputs[0], model_outputs[1]  # Shape: [batch_size, max_seq_len, action_dim], [batch_size, max_seq_len, 1]
-        printw(f"pred_actions: {pred_actions[0]}")
-        printw(f"pred_rewards: {pred_rewards[0]}")
-        loss_positions = batch['loss_positions'] # Shape: [batch_size]
-        
-        # Extract predictions at specific positions for each batch item
-        batch_size = true_actions.shape[0]
-        selected_pred_actions = torch.zeros_like(true_actions)  # [batch_size, action_dim]
-        selected_pred_rewards = torch.zeros(batch_size, 1).to(device)  # [batch_size, 1]
+        self.model.train()
+        model_outputs = self.model(batch)
+        pred_actions, pred_rewards = model_outputs[0], model_outputs[1]
+        loss_positions = batch['loss_positions']
+        true_actions = batch['optimal_actions']
 
+        batch_size = true_actions.shape[0]
+        selected_pred_actions = torch.zeros_like(true_actions)
+        selected_pred_rewards = torch.zeros(batch_size, 1).to(device)
         for i in range(batch_size):
             pos = loss_positions[i].item()
-            selected_pred_actions[i] = pred_actions[i, pos]  # Get prediction at specific position
-            selected_pred_rewards[i] = pred_rewards[i, pos]   # Get reward prediction at specific position
+            selected_pred_actions[i] = pred_actions[i, pos]
+            selected_pred_rewards[i] = pred_rewards[i, pos]
+        timings['forward'] = time.time() - t_fwd_start
 
         # Compute statistics needed for different beta schedules
         beta_kwargs = dict(self.confidence_kwargs)
@@ -314,18 +242,7 @@ class OnlineEnvironmentManager:
             policy_entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).mean().item()
             beta_kwargs['policy_entropy'] = policy_entropy
 
-        # 2. Reward prediction error (for reward_prediction_error only)
-        if self.confidence_type == 'reward_prediction_error':
-            # Get actual rewards from the current step (stored in env_data)
-            actual_rewards = np.array([data['reward'] for data in env_data])
-            # Get predicted rewards from the model (detach to avoid gradient issues)
-            predicted_rewards = selected_pred_rewards.detach().cpu().numpy().flatten()
-            # Mean absolute prediction error for the current position
-            # printw(f"actual rewards: {actual_rewards}")
-            # printw(f"predicted rewards: {predicted_rewards}")
-            # printw(f"reward prediction error: {np.abs(predicted_rewards - actual_rewards)}")
-            reward_prediction_error = np.mean(np.abs(predicted_rewards - actual_rewards))
-            beta_kwargs['reward_prediction_error'] = reward_prediction_error
+        # We will fill beta_kwargs['reward_prediction_error'] after executing envs (need actual rewards)
             
         # Reward statistics (for reward_variance - keep this for other confidence types)
         elif self.confidence_type == 'reward_variance':
@@ -346,49 +263,66 @@ class OnlineEnvironmentManager:
                 beta_kwargs['reward_var'] = reward_var
                 beta_kwargs['reward_std'] = reward_std
 
-        # Calculate beta (entropy penalty coefficient)
-        beta = get_beta_value(
-            self.confidence_type, current_iteration, horizon,
-            **beta_kwargs
-        )
+        # PHASE 3: Sample actions from selected_pred_actions and step envs
+        t_env_start = time.time()
+        sampled_action_indices = torch.multinomial(torch.softmax(selected_pred_actions.detach(), dim=-1), 1).squeeze(1).tolist()
+        true_rewards_list = []
+        for idx, data in enumerate(env_data):
+            env = data['env']
+            current_state = data['current_state']
+            action_idx = sampled_action_indices[idx]
+            data['model_action'] = np.zeros(selected_pred_actions.shape[1])
+            data['model_action'][action_idx] = 1.0
 
-        # ENTROPY-PENALIZED CROSS-ENTROPY LOSS
-        # For linear/stepped/constant: Loss = CE(pred, true) - beta * H(pred)
-        # For linear_interpolate: Loss = (1-beta) * CE(pred, true) - beta * H(pred)
-        # where H(pred) = -sum(p * log(p)) is the entropy of model output
-        
-        # Standard cross-entropy loss
+            if self.env_type in ['bandit', 'linear_bandit']:
+                next_state, reward = env.transit(current_state, data['model_action'])
+            elif self.env_type.startswith('darkroom'):
+                next_state, reward = env.transit(current_state, data['model_action'])
+            elif self.env_type == 'miniworld':
+                _, reward, _, _, _ = env.step(action_idx)
+                next_state = env.agent.dir_vec[[0, -1]]
+
+            data['reward'] = reward
+            data['next_state'] = next_state
+            true_rewards_list.append(reward)
+
+            # Update the just-appended placeholders with actual action and reward
+            self.contexts[data['env_idx']]['actions'][-1] = data['model_action']
+            self.contexts[data['env_idx']]['rewards'][-1] = reward
+        timings['env_step'] = time.time() - t_env_start
+
+        # PHASE 4: Compute loss (reuse selected_pred_*), then backward
+        t_train_start = time.time()
+        # Calculate beta (entropy penalty coefficient)
+        if self.confidence_type == 'reward_prediction_error':
+            with torch.no_grad():
+                true_rewards_tensor = torch.tensor(true_rewards_list, dtype=selected_pred_rewards.dtype, device=selected_pred_rewards.device).view(-1, 1)
+                rpe = torch.mean(torch.abs(selected_pred_rewards.detach() - true_rewards_tensor)).item()
+            beta_kwargs['reward_prediction_error'] = rpe
+        beta = get_beta_value(self.confidence_type, current_iteration, horizon, **beta_kwargs)
+
+        # Loss terms
         ce_loss = loss_fn(selected_pred_actions, true_actions)
-        
-        # Get true rewards for reward prediction loss
-        true_rewards = torch.zeros(batch_size, 1).to(device)
-        for i, data in enumerate(env_data):
-            true_rewards[i] = data['reward']
-        
-        # Reward prediction loss (MSE)
-        reward_loss = torch.nn.functional.mse_loss(selected_pred_rewards, true_rewards)
-        
-        # Calculate entropy of model predictions
+        true_rewards_tensor = torch.tensor(true_rewards_list, dtype=selected_pred_rewards.dtype, device=selected_pred_rewards.device).view(-1, 1)
+        reward_loss = torch.nn.functional.mse_loss(selected_pred_rewards, true_rewards_tensor)
         pred_probs = torch.softmax(selected_pred_actions, dim=-1)
         entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
         total_entropy = entropy.sum()
-        
-        # Final loss: depends on confidence type
-        # Total loss = action_loss + reward_loss - beta * entropy
+
         if self.confidence_type == 'linear_interpolate':
-            # Interpolated loss: (1-beta) * CE + reward_loss - beta * entropy
             loss = (1 - beta) * ce_loss + reward_loss - beta * total_entropy
         else:
-            # Standard entropy penalty: CE + reward_loss - beta * entropy
             loss = ce_loss + reward_loss - beta * total_entropy
-        
-        # Single backward pass for entire batch
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        timings['training'] = time.time() - t_train_start
 
         # Compute average loss per sample
         total_loss = loss.item() / batch_size
+        
+        timings['total'] = time.time() - total_start
 
         # PHASE 4: Debug output (show first 3 environments)
         if debug and len(env_data) > 0:
@@ -400,7 +334,7 @@ class OnlineEnvironmentManager:
                 env_idx = data['env_idx']
                 
                 # Extract predictions for this environment
-                pred_probs_display = torch.softmax(pred_actions.view(batch_size, horizon, action_dim)[debug_idx, -1], dim=-1)
+                pred_probs_display = torch.softmax(selected_pred_actions[debug_idx], dim=-1)
                 optimal_action = training_samples[debug_idx]['optimal_action']
                 optimal_action_idx = np.argmax(optimal_action)
                 sampled_action_idx = np.argmax(data['model_action'])
@@ -445,8 +379,8 @@ class OnlineEnvironmentManager:
                 debug_info['env_steps'].append(step_debug)
 
         if debug:
-            return total_loss, debug_info, beta
-        return total_loss, beta
+            return total_loss, debug_info, beta, timings
+        return total_loss, beta, timings
 
     def _get_model_action(self, env_idx, query_state, debug=False):
         """Get action from model given current context and query state."""
@@ -736,15 +670,18 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
+    parser.add_argument('--checkpoint_dir', type=str, default=None, help='Directory containing checkpoints to resume from')
 
-    args = vars(parser.parse_args())
+    cli_args = vars(parser.parse_args())
 
     # Load config from YAML file
-    with open(args['config'], 'r') as f:
+    with open(cli_args['config'], 'r') as f:
         config_args = yaml.safe_load(f)
 
-    # Use config values as args
+    # Use config values as args and merge CLI-only overrides
     args = config_args
+    if cli_args.get('checkpoint_dir') is not None:
+        args['checkpoint_dir'] = cli_args['checkpoint_dir']
 
     print("Args: ", args)
 
@@ -778,6 +715,7 @@ if __name__ == '__main__':
     lin_d = args.get('lin_d', 2)  # Only needed for linear_bandit
     samples_per_iter = args.get('samples_per_iter', 64)
     debug_mode = args.get('debug', False)
+    print_every = args.get('print_every', 5)
 
     # Beta (entropy penalty) parameters
     confidence_type = args.get('confidence_type', 'linear')
@@ -786,6 +724,11 @@ if __name__ == '__main__':
     if max_position <= 0:
         max_position = 40
     confidence_value = args.get('confidence_value', 0.1)
+    
+    # Max context length to avoid quadratic scaling in transformer attention
+    # This caps the context at max_context_length steps (3*max_context_length tokens)
+    # Default 1024 allows longer context while still preventing unbounded growth
+    max_context_length = args.get('max_context_length', 1024)  # Default 1024
 
     tmp_seed = seed
     if seed == -1:
@@ -912,18 +855,28 @@ if __name__ == '__main__':
     
     filename = filename.replace('.pt', f'{filename_suffix}.pt')
 
-    # Create experiment directory structure
-    experiment_dir = f'models/{env}/{experiment_id}'
-    os.makedirs(experiment_dir, exist_ok=True)
+    # Create or reuse experiment directory structure
+    checkpoint_dir = args.get('checkpoint_dir')
+    if checkpoint_dir is not None and os.path.isdir(checkpoint_dir):
+        experiment_dir = checkpoint_dir
+    else:
+        experiment_dir = f'models/{env}/{experiment_id}'
+        os.makedirs(experiment_dir, exist_ok=True)
 
-    # Save config file in experiment directory
+    # Save/Update config file in experiment directory (overwrite to reflect resume info)
     config_path = f'{experiment_dir}/config.yaml'
     with open(config_path, 'w') as f:
         yaml.dump(args, f, default_flow_style=False)
 
     log_filename = f'{experiment_dir}/logs.txt'
-    with open(log_filename, 'w') as f:
-        pass
+    if checkpoint_dir is None:
+        with open(log_filename, 'w') as f:
+            pass
+    else:
+        os.makedirs(experiment_dir, exist_ok=True)
+        if not os.path.exists(log_filename):
+            with open(log_filename, 'w') as f:
+                pass
     def printw(string):
         print(string)
         with open(log_filename, 'a') as f:
@@ -939,6 +892,7 @@ if __name__ == '__main__':
         'confidence_start': confidence_start,
         'max_position': max_position,
         'confidence_value': confidence_value,
+        'max_context_length': max_context_length,
     }
 
     # Create online environment manager with entropy penalty loss
@@ -959,6 +913,74 @@ if __name__ == '__main__':
             **confidence_kwargs
         )
 
+    # Resume model weights if checkpoint_dir provided
+    def _find_latest_checkpoint(directory):
+        epoch_ckpts = []
+        try:
+            for fn in os.listdir(directory):
+                if fn.startswith('epoch') and fn.endswith('.pt'):
+                    num_str = fn[len('epoch'):-3]
+                    if num_str.isdigit():
+                        epoch_ckpts.append((int(num_str), os.path.join(directory, fn)))
+        except FileNotFoundError:
+            return None
+        if epoch_ckpts:
+            epoch_ckpts.sort(key=lambda x: x[0])
+            return epoch_ckpts[-1][1]
+        final_path = os.path.join(directory, 'final_model.pt')
+        return final_path if os.path.exists(final_path) else None
+
+    if checkpoint_dir is not None:
+        latest_ckpt = _find_latest_checkpoint(experiment_dir)
+        if latest_ckpt is not None:
+            state = torch.load(latest_ckpt, map_location=device)
+            model.load_state_dict(state)
+            printw(f"Resumed model weights from checkpoint: {latest_ckpt}")
+        else:
+            printw(f"No checkpoint found in {experiment_dir}; starting fresh.")
+
+    # Determine epoch offset so numbering/filenames continue across resumes
+    def _get_existing_max_epoch(directory):
+        max_epoch = 0
+        try:
+            for fn in os.listdir(directory):
+                if fn.startswith('epoch') and fn.endswith('.pt'):
+                    num_str = fn[len('epoch'):-3]
+                    if num_str.isdigit():
+                        max_epoch = max(max_epoch, int(num_str))
+        except FileNotFoundError:
+            return 0
+        return max_epoch
+
+    resume_epoch_offset = _get_existing_max_epoch(experiment_dir) if checkpoint_dir is not None else 0
+    # Compute remaining epochs so we only finish total target epochs
+    remaining_epochs = max(0, num_epochs - resume_epoch_offset)
+    # Update config.yaml with resume metadata
+    try:
+        with open(config_path, 'w') as f:
+            merged = dict(args)
+            merged.update({
+                'resume': checkpoint_dir is not None,
+                'resumed_from_epoch': int(resume_epoch_offset),
+                'remaining_epochs': int(remaining_epochs),
+            })
+            yaml.dump(merged, f, default_flow_style=False)
+    except Exception:
+        pass
+
+    # Prepare metrics persistence to preserve curves across resumes
+    metrics_path = os.path.join(experiment_dir, 'metrics.npz')
+    if checkpoint_dir is not None and os.path.exists(metrics_path):
+        try:
+            loaded = np.load(metrics_path, allow_pickle=True)
+            train_loss = list(loaded.get('train_loss', np.array([])).tolist())
+            step_losses = list(loaded.get('step_losses', np.array([])).tolist())
+            beta_schedule = list(loaded.get('beta_schedule', np.array([])).tolist())
+            total_iterations = int(loaded.get('total_iterations', np.array(0)))
+            printw(f"Loaded previous metrics from {metrics_path} (epochs={len(train_loss)}, steps={len(step_losses)})")
+        except Exception as e:
+            printw(f"Warning: Failed to load metrics from {metrics_path}: {e}")
+
     printw(f"Starting online training with entropy penalty (beta schedule: {confidence_type}) for {env}")
     printw(f"Model filename: {filename}")
     printw(f"Confidence type: {confidence_type}")
@@ -971,8 +993,8 @@ if __name__ == '__main__':
     if confidence_type == 'linear_interpolate':
         printw(f"Loss formula: (1-beta) * CE - beta * Entropy")
 
-    for epoch in range(num_epochs):
-        printw(f"Epoch: {epoch + 1}")
+    for epoch in range(remaining_epochs):
+        printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
         start_time = time.time()
 
         # Reset environment contexts at start of each epoch
@@ -989,10 +1011,10 @@ if __name__ == '__main__':
             should_debug = debug_mode #and (epoch == 0 and iteration < 10)
             
             if should_debug:
-                iteration_loss, debug_info, beta = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration, debug=True)
+                iteration_loss, debug_info, beta, timings = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration, debug=True)
                 printw(f"\n=== DEBUG: Epoch {epoch+1}, Iteration {iteration} ===")
             else:
-                iteration_loss, beta = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration)
+                iteration_loss, beta, timings = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration)
 
             epoch_train_loss += iteration_loss
             epoch_iterations += 1
@@ -1000,11 +1022,17 @@ if __name__ == '__main__':
             step_losses.append(iteration_loss)  # Store step-level loss
             beta_schedule.append(beta)
 
-            if iteration % 1 == 0:
+            if iteration % max(1, print_every) == 0:
                 conf_info = confidence_type
                 if confidence_type == 'stepped':
                     conf_info += f"(max_pos={max_position})"
-                printw(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Beta: {beta:.3f} ({conf_info})")
+                fwd_time = timings.get('forward', 0) * 1000
+                env_time = timings.get('env_step', 0) * 1000
+                train_time = timings.get('training', 0) * 1000
+                total_time = timings.get('total', 0) * 1000
+                # Get actual context length from first environment
+                actual_context_len = len(env_manager.contexts[0]['states']) if env_manager.contexts else 0
+                printw(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Beta: {beta:.3f} ({conf_info}) | Context={actual_context_len} | Times: fwd={fwd_time:.1f}ms, env={env_time:.1f}ms, train={train_time:.1f}ms, total={total_time:.1f}ms")
 
         train_loss.append(epoch_train_loss / epoch_iterations)
         end_time = time.time()
@@ -1015,11 +1043,11 @@ if __name__ == '__main__':
 
         # Checkpointing
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
-            torch.save(model.state_dict(), f'{experiment_dir}/epoch{epoch+1}.pt')
+            torch.save(model.state_dict(), f'{experiment_dir}/epoch{resume_epoch_offset + epoch + 1}.pt')
 
         # Plotting
         if (epoch + 1) % 1 == 0:
-            printw(f"Epoch: {epoch + 1}")
+            printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
             printw(f"Train Loss: {train_loss[-1]:.6f}")
             printw("\n")
 
@@ -1051,6 +1079,18 @@ if __name__ == '__main__':
             plt.tight_layout()
             plt.savefig(f"{experiment_dir}/train_loss.png")
             plt.clf()
+
+            # Persist metrics so future resumes extend curves
+            try:
+                np.savez_compressed(
+                    metrics_path,
+                    train_loss=np.array(train_loss),
+                    step_losses=np.array(step_losses),
+                    beta_schedule=np.array(beta_schedule),
+                    total_iterations=np.array(total_iterations),
+                )
+            except Exception as e:
+                printw(f"Warning: Failed to save metrics to {metrics_path}: {e}")
 
     torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
     printw("Online training with entropy penalty completed!")

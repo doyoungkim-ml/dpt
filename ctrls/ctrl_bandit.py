@@ -397,9 +397,9 @@ class BanditTransformerController(Controller):
         new_batch = {}
         for key in batch.keys():
             # Log shape before conversion
-            print(f"DEBUG set_batch: {key} shape (numpy): {batch[key].shape if isinstance(batch[key], np.ndarray) else 'not numpy'}")
+            # print(f"DEBUG set_batch: {key} shape (numpy): {batch[key].shape if isinstance(batch[key], np.ndarray) else 'not numpy'}")
             new_batch[key] = torch.tensor(batch[key]).float().to(device)
-            print(f"DEBUG set_batch: {key} shape (tensor): {new_batch[key].shape}")
+            # print(f"DEBUG set_batch: {key} shape (tensor): {new_batch[key].shape}")
         self.set_batch(new_batch)
 
     def act(self, x):
@@ -476,17 +476,17 @@ class BanditTransformerController(Controller):
             model_batch['context_rewards'] = self.batch['context_rewards']
             
                 # Print shape for debugging
-            print(f"DEBUG act_numpy_vec: context_states shape: {model_batch['context_states'].shape}, "
-                  f"context_actions shape: {model_batch['context_actions'].shape}, "
-                  f"context_rewards shape: {model_batch['context_rewards'].shape}")
+            # print(f"DEBUG act_numpy_vec: context_states shape: {model_batch['context_states'].shape}, "
+            #       f"context_actions shape: {model_batch['context_actions'].shape}, "
+            #       f"context_rewards shape: {model_batch['context_rewards'].shape}")
             
             model_batch['context_lengths'] = torch.tensor([context_len] * self.batch_size).long().to(device)
             loss_positions = torch.tensor([context_len - 1] * self.batch_size).long().to(device)
         
         # Print final batch shapes before model call
-        print(f"DEBUG before model call: context_states shape: {model_batch['context_states'].shape}, "
-              f"context_actions shape: {model_batch['context_actions'].shape}, "
-              f"context_rewards shape: {model_batch['context_rewards'].shape}")
+        # print(f"DEBUG before model call: context_states shape: {model_batch['context_states'].shape}, "
+        #       f"context_actions shape: {model_batch['context_actions'].shape}, "
+        #       f"context_rewards shape: {model_batch['context_rewards'].shape}")
 
         a, _ = self.model(model_batch)
         

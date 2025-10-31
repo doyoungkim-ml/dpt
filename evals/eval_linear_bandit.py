@@ -287,7 +287,7 @@ def offline(eval_trajs, model, n_eval, horizon, var):
 
 
 def offline_graph(eval_trajs, model, n_eval, horizon, var):
-    horizons = np.linspace(1, horizon, horizon, dtype=int)
+    horizons = np.unique(np.linspace(1, horizon, horizon, dtype=int))
 
     all_means = []
     all_sems = []
