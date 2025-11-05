@@ -7,6 +7,7 @@ import os
 import time
 import yaml
 from IPython import embed
+from pathlib import Path
 
 import wandb
 import torch
@@ -34,6 +35,9 @@ from skimage.transform import resize
 import gym
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+
+from training_eval import log_evaluation_plots_to_wandb
+EVAL_ENABLED = True
 
 
 def get_beta_value(confidence_type, iteration, horizon, **kwargs):
@@ -131,6 +135,8 @@ class OnlineEnvironmentManager:
         self.kwargs = kwargs
         # Set max context length to avoid quadratic scaling (default 1024)
         self.max_context_length = kwargs.get('max_context_length', 1024)
+        # Set batch size for processing environments (default 64 to match offline training)
+        self.batch_size = kwargs.get('batch_size', 64)
         self.reset_contexts()
 
     def reset_contexts(self):
@@ -144,21 +150,17 @@ class OnlineEnvironmentManager:
         self.past_key_values = {i: None for i in range(len(self.envs))}
 
     def step_and_learn(self, optimizer, loss_fn, action_dim, horizon, current_iteration, debug=False):
-        """Step environments and learn using a single forward pass per iteration.
+        """Step environments and learn using batched processing to avoid OOM.
 
-        Optimization changes:
-        - Append current state to contexts BEFORE the model forward so the same forward is reused
-          for both action sampling and loss computation.
-        - Remove the separate inference-only forward to cut compute roughly in half.
-        - Minimize NumPy↔Torch conversions in the hot path.
-        - Make logging/timing lighter.
+        Processes environments in batches to match offline training memory usage.
         """
         total_start = time.time()
         timings = {}
         
         debug_info = {'env_steps': []} if debug else None
         
-        # PHASE 1: Collect data and append current state to contexts
+        # PHASE 1: Collect data and append current state to contexts for ALL environments
+        # (This is cheap, just appending to lists)
         env_data = []
         for env_idx in range(len(self.envs)):
             env = self.envs[env_idx]
@@ -204,56 +206,28 @@ class OnlineEnvironmentManager:
                 'recent_rewards': recent_rewards
             })
 
-        # PHASE 2: Build training samples (now include the just-appended current state)
-        training_samples = []
-        for data in env_data:
-            training_sample = self._create_training_sample(data['env'], data['env_idx'], data['current_state'])
-            training_samples.append(training_sample)
-
-        # Single forward pass for action sampling AND loss
-        t_fwd_start = time.time()
-        if self.env_type == 'miniworld':
-            batch = batch_to_tensors(training_samples, self.config, self.env_type, self.kwargs.get('transform'))
-        else:
-            batch = batch_to_tensors(training_samples, self.config, self.env_type)
-        batch = {k: v.to(device) for k, v in batch.items()}
-
-        self.model.train()
-        model_outputs = self.model(batch)
-        pred_actions, pred_rewards = model_outputs[0], model_outputs[1]
-        loss_positions = batch['loss_positions']
-        true_actions = batch['optimal_actions']
-
-        batch_size = true_actions.shape[0]
-        selected_pred_actions = torch.zeros_like(true_actions)
-        selected_pred_rewards = torch.zeros(batch_size, 1).to(device)
-        for i in range(batch_size):
-            pos = loss_positions[i].item()
-            selected_pred_actions[i] = pred_actions[i, pos]
-            selected_pred_rewards[i] = pred_rewards[i, pos]
-        timings['forward'] = time.time() - t_fwd_start
-
-        # Compute statistics needed for different beta schedules
+        # PHASE 2: Process environments in batches to avoid OOM
+        # Split environments into batches
+        n_envs = len(self.envs)
+        batch_size = self.batch_size
+        num_batches = (n_envs + batch_size - 1) // batch_size
+        
+        # Accumulate losses and metrics across batches
+        total_loss_sum = 0.0
+        total_ce_loss_sum = 0.0
+        total_entropy_sum = 0.0
+        total_samples = 0
+        
+        # Compute statistics needed for different beta schedules (using all environments)
         beta_kwargs = dict(self.confidence_kwargs)
-
-        # 1. Policy entropy (for self_referential_entropy)
-        if self.confidence_type == 'self_referential_entropy':
-            pred_probs = torch.softmax(selected_pred_actions, dim=-1)
-            policy_entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).mean().item()
-            beta_kwargs['policy_entropy'] = policy_entropy
-
-        # We will fill beta_kwargs['reward_prediction_error'] after executing envs (need actual rewards)
-            
-        # Reward statistics (for reward_variance - keep this for other confidence types)
-        elif self.confidence_type == 'reward_variance':
-            # Aggregate rewards from all environments up to current iteration
+        
+        # Reward statistics (for reward_variance) - computed once from all environments
+        if self.confidence_type == 'reward_variance':
             all_rewards = []
-            current_rewards = []
             for env_idx in range(len(self.envs)):
                 env_rewards = self.contexts[env_idx]['rewards']
                 if len(env_rewards) > 0:
                     all_rewards.extend(env_rewards[:-1])  # All but last (history)
-                    current_rewards.append(env_rewards[-1])  # Current reward
 
             if len(all_rewards) > 0:
                 reward_mean = np.mean(all_rewards)
@@ -263,124 +237,198 @@ class OnlineEnvironmentManager:
                 beta_kwargs['reward_var'] = reward_var
                 beta_kwargs['reward_std'] = reward_std
 
-        # PHASE 3: Sample actions from selected_pred_actions and step envs
-        t_env_start = time.time()
-        sampled_action_indices = torch.multinomial(torch.softmax(selected_pred_actions.detach(), dim=-1), 1).squeeze(1).tolist()
-        true_rewards_list = []
-        for idx, data in enumerate(env_data):
-            env = data['env']
-            current_state = data['current_state']
-            action_idx = sampled_action_indices[idx]
-            data['model_action'] = np.zeros(selected_pred_actions.shape[1])
-            data['model_action'][action_idx] = 1.0
-
-            if self.env_type in ['bandit', 'linear_bandit']:
-                next_state, reward = env.transit(current_state, data['model_action'])
-            elif self.env_type.startswith('darkroom'):
-                next_state, reward = env.transit(current_state, data['model_action'])
-            elif self.env_type == 'miniworld':
-                _, reward, _, _, _ = env.step(action_idx)
-                next_state = env.agent.dir_vec[[0, -1]]
-
-            data['reward'] = reward
-            data['next_state'] = next_state
-            true_rewards_list.append(reward)
-
-            # Update the just-appended placeholders with actual action and reward
-            self.contexts[data['env_idx']]['actions'][-1] = data['model_action']
-            self.contexts[data['env_idx']]['rewards'][-1] = reward
-        timings['env_step'] = time.time() - t_env_start
-
-        # PHASE 4: Compute loss (reuse selected_pred_*), then backward
-        t_train_start = time.time()
-        # Calculate beta (entropy penalty coefficient)
-        if self.confidence_type == 'reward_prediction_error':
-            with torch.no_grad():
-                true_rewards_tensor = torch.tensor(true_rewards_list, dtype=selected_pred_rewards.dtype, device=selected_pred_rewards.device).view(-1, 1)
-                rpe = torch.mean(torch.abs(selected_pred_rewards.detach() - true_rewards_tensor)).item()
-            beta_kwargs['reward_prediction_error'] = rpe
-        beta = get_beta_value(self.confidence_type, current_iteration, horizon, **beta_kwargs)
-
-        # Loss terms
-        ce_loss = loss_fn(selected_pred_actions, true_actions)
-        true_rewards_tensor = torch.tensor(true_rewards_list, dtype=selected_pred_rewards.dtype, device=selected_pred_rewards.device).view(-1, 1)
-        reward_loss = torch.nn.functional.mse_loss(selected_pred_rewards, true_rewards_tensor)
-        pred_probs = torch.softmax(selected_pred_actions, dim=-1)
-        entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
-        total_entropy = entropy.sum()
-
-        if self.confidence_type == 'linear_interpolate':
-            loss = (1 - beta) * ce_loss + reward_loss - beta * total_entropy
-        else:
-            loss = ce_loss + reward_loss - beta * total_entropy
-
         optimizer.zero_grad()
-        loss.backward()
+        
+        t_fwd_start = time.time()
+        t_env_start = time.time()
+        
+        # Process each batch
+        all_true_rewards_list = []
+        all_sampled_action_indices = []
+        
+        # Compute beta once before processing batches (for consistency)
+        # For self_referential_entropy, we need to sample first, so compute it in first batch
+        beta_computed = False
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, n_envs)
+            batch_env_indices = list(range(start_idx, end_idx))
+            batch_env_data = [env_data[i] for i in batch_env_indices]
+            
+            # Build training samples for this batch
+            training_samples = []
+            for data in batch_env_data:
+                training_sample = self._create_training_sample(data['env'], data['env_idx'], data['current_state'])
+                training_samples.append(training_sample)
+            
+            # Forward pass for this batch
+            if self.env_type == 'miniworld':
+                batch = batch_to_tensors(training_samples, self.config, self.env_type, self.kwargs.get('transform'))
+            else:
+                batch = batch_to_tensors(training_samples, self.config, self.env_type)
+            batch = {k: v.to(device) for k, v in batch.items()}
+
+            self.model.train()
+            model_outputs = self.model(batch)
+            pred_actions, pred_rewards = model_outputs[0], model_outputs[1]
+            loss_positions = batch['loss_positions']
+            true_actions = batch['optimal_actions']
+
+            current_batch_size = true_actions.shape[0]
+            selected_pred_actions = torch.zeros_like(true_actions)
+            selected_pred_rewards = torch.zeros(current_batch_size, 1).to(device)
+            for i in range(current_batch_size):
+                pos = loss_positions[i].item()
+                selected_pred_actions[i] = pred_actions[i, pos]
+                selected_pred_rewards[i] = pred_rewards[i, pos]
+            
+            # Sample actions for this batch
+            sampled_action_indices_batch = torch.multinomial(torch.softmax(selected_pred_actions.detach(), dim=-1), 1).squeeze(1).tolist()
+            all_sampled_action_indices.extend(sampled_action_indices_batch)
+            
+            # Step environments for this batch
+            true_rewards_list_batch = []
+            for idx, data in enumerate(batch_env_data):
+                env = data['env']
+                current_state = data['current_state']
+                action_idx = sampled_action_indices_batch[idx]
+                data['model_action'] = np.zeros(selected_pred_actions.shape[1])
+                data['model_action'][action_idx] = 1.0
+
+                if self.env_type in ['bandit', 'linear_bandit']:
+                    next_state, reward = env.transit(current_state, data['model_action'])
+                elif self.env_type.startswith('darkroom'):
+                    next_state, reward = env.transit(current_state, data['model_action'])
+                elif self.env_type == 'miniworld':
+                    _, reward, _, _, _ = env.step(action_idx)
+                    next_state = env.agent.dir_vec[[0, -1]]
+
+                data['reward'] = reward
+                data['next_state'] = next_state
+                true_rewards_list_batch.append(reward)
+
+                # Update the just-appended placeholders with actual action and reward
+                self.contexts[data['env_idx']]['actions'][-1] = data['model_action']
+                self.contexts[data['env_idx']]['rewards'][-1] = reward
+            
+            all_true_rewards_list.extend(true_rewards_list_batch)
+            
+            # Compute loss for this batch (will accumulate gradients)
+            true_rewards_tensor = torch.tensor(true_rewards_list_batch, dtype=selected_pred_rewards.dtype, device=selected_pred_rewards.device).view(-1, 1)
+            
+            # Calculate beta (entropy penalty coefficient) - compute once using first batch for consistency
+            if not beta_computed:
+                # For self_referential_entropy, compute policy entropy from first batch
+                if self.confidence_type == 'self_referential_entropy':
+                    pred_probs = torch.softmax(selected_pred_actions, dim=-1)
+                    policy_entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).mean().item()
+                    beta_kwargs['policy_entropy'] = policy_entropy
+                
+                # For reward_prediction_error, compute from first batch
+                if self.confidence_type == 'reward_prediction_error':
+                    with torch.no_grad():
+                        rpe = torch.mean(torch.abs(selected_pred_rewards.detach() - true_rewards_tensor)).item()
+                    beta_kwargs['reward_prediction_error'] = rpe
+                
+                beta = get_beta_value(self.confidence_type, current_iteration, horizon, **beta_kwargs)
+                beta_computed = True
+            
+            # Loss terms for this batch
+            ce_loss = loss_fn(selected_pred_actions, true_actions)
+            reward_loss = torch.nn.functional.mse_loss(selected_pred_rewards, true_rewards_tensor)
+            pred_probs = torch.softmax(selected_pred_actions, dim=-1)
+            entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1)
+            total_entropy = entropy.sum()
+
+            if self.confidence_type == 'linear_interpolate':
+                loss = (1 - beta) * ce_loss + reward_loss - beta * total_entropy
+            else:
+                loss = ce_loss + reward_loss - beta * total_entropy
+            
+            # Scale loss by batch size and accumulate gradients
+            # Divide by num_batches so that total gradient is averaged across all batches
+            scaled_loss = loss / num_batches
+            scaled_loss.backward()
+            
+            # Accumulate metrics
+            total_loss_sum += loss.item()
+            total_ce_loss_sum += ce_loss.item()
+            total_entropy_sum += total_entropy.item()
+            total_samples += current_batch_size
+            
+            # Debug output for first batch
+            if debug and batch_idx == 0 and len(batch_env_data) > 0:
+                num_debug_envs = min(1, len(batch_env_data))
+                for debug_idx in range(num_debug_envs):
+                    data = batch_env_data[debug_idx]
+                    env_idx = data['env_idx']
+                    
+                    pred_probs_display = torch.softmax(selected_pred_actions[debug_idx], dim=-1)
+                    optimal_action = training_samples[debug_idx]['optimal_action']
+                    optimal_action_idx = np.argmax(optimal_action)
+                    sampled_action_idx = np.argmax(data['model_action'])
+                    sampling_match = sampled_action_idx == optimal_action_idx
+                    
+                    if self.env_type in ['bandit', 'linear_bandit']:
+                        prob_str = ", ".join([f"A{i}:{pred_probs_display[i].item():.3f}" for i in range(len(pred_probs_display))])
+                    else:
+                        prob_str = ", ".join([f"A{i}:{pred_probs_display[i].item():.3f}" for i in range(len(pred_probs_display))])
+                    
+                    conf_info = f"{self.confidence_type}"
+                    if self.confidence_type in ['linear', 'linear_interpolate']:
+                        conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.1)})"
+                    elif self.confidence_type == 'stepped':
+                        conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.1)}, max_pos={self.confidence_kwargs.get('max_position', 40)})"
+                    
+                    avg_entropy = (total_entropy / current_batch_size).item()
+                    ce_loss_avg = (ce_loss / current_batch_size).item()
+                    batch_loss = loss.item() / current_batch_size
+                    
+                    print(f"Batch: Env {env_idx}: Context={data['context_size']}, Beta={beta:.3f} ({conf_info}), Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, CE_Loss={ce_loss_avg:.4f}, Entropy={avg_entropy:.4f}, Total_Loss={batch_loss:.4f}, BatchSize={current_batch_size}")
+                    
+                    step_debug = {
+                        'env_idx': env_idx,
+                        'current_state': data['current_state'].tolist(),
+                        'context_size': data['context_size'],
+                        'recent_rewards': data['recent_rewards'],
+                        'beta': beta,
+                        'confidence_type': self.confidence_type,
+                        'pred_probs': pred_probs_display.tolist(),
+                        'sampled_action_idx': sampled_action_idx,
+                        'optimal_action_idx': optimal_action_idx,
+                        'sampling_match': sampling_match,
+                        'reward': data['reward'],
+                        'ce_loss': ce_loss_avg,
+                        'entropy': avg_entropy,
+                        'step_loss': batch_loss,
+                        'next_state': data['next_state'].tolist(),
+                        'batch_size': current_batch_size
+                    }
+                    debug_info['env_steps'].append(step_debug)
+        
+        timings['forward'] = time.time() - t_fwd_start
+        timings['env_step'] = time.time() - t_env_start
+        
+        # Beta should already be computed in the loop, but ensure it's set
+        if not beta_computed:
+            beta = get_beta_value(self.confidence_type, current_iteration, horizon, **beta_kwargs)
+        
+        # Update optimizer once after all batches
+        t_train_start = time.time()
         optimizer.step()
         timings['training'] = time.time() - t_train_start
-
-        # Compute average loss per sample
-        total_loss = loss.item() / batch_size
+        
+        # Compute average metrics across all batches
+        total_loss = total_loss_sum / total_samples
+        ce_loss_avg = total_ce_loss_sum / total_samples
+        entropy_avg = total_entropy_sum / total_samples
         
         timings['total'] = time.time() - total_start
-
-        # PHASE 4: Debug output (show first 3 environments)
-        if debug and len(env_data) > 0:
-            # Show debug info for first environment
-            num_debug_envs = min(1, len(env_data))
-            
-            for debug_idx in range(num_debug_envs):
-                data = env_data[debug_idx]
-                env_idx = data['env_idx']
-                
-                # Extract predictions for this environment
-                pred_probs_display = torch.softmax(selected_pred_actions[debug_idx], dim=-1)
-                optimal_action = training_samples[debug_idx]['optimal_action']
-                optimal_action_idx = np.argmax(optimal_action)
-                sampled_action_idx = np.argmax(data['model_action'])
-                sampling_match = sampled_action_idx == optimal_action_idx
-                
-                # Format probability distribution for display
-                if self.env_type in ['bandit', 'linear_bandit']:
-                    prob_str = ", ".join([f"A{i}:{pred_probs_display[i].item():.3f}" for i in range(len(pred_probs_display))])
-                else:
-                    prob_str = ", ".join([f"A{i}:{pred_probs_display[i].item():.3f}" for i in range(len(pred_probs_display))])
-                    
-                # Format confidence function info for display
-                conf_info = f"{self.confidence_type}"
-                if self.confidence_type in ['linear', 'linear_interpolate']:
-                    conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.1)})"
-                elif self.confidence_type == 'stepped':
-                    conf_info += f"(start={self.confidence_kwargs.get('confidence_start', 0.1)}, max_pos={self.confidence_kwargs.get('max_position', 40)})"
-                    
-                avg_entropy = (total_entropy / batch_size).item()
-                ce_loss_avg = (ce_loss / batch_size).item()
-                    
-                print(f"Batch: Env {env_idx}: Context={data['context_size']}, Beta={beta:.3f} ({conf_info}), Probs=[{prob_str}], SampledAction={sampled_action_idx}, OptimalAction={optimal_action_idx}, Match={sampling_match}, Reward={data['reward']:.3f}, CE_Loss={ce_loss_avg:.4f}, Entropy={avg_entropy:.4f}, Total_Loss={total_loss:.4f}, BatchSize={batch_size}")
-                
-                step_debug = {
-                    'env_idx': env_idx,
-                    'current_state': data['current_state'].tolist(),
-                    'context_size': data['context_size'],
-                    'recent_rewards': data['recent_rewards'],
-                    'beta': beta,
-                    'confidence_type': self.confidence_type,
-                    'pred_probs': pred_probs_display.tolist(),
-                    'sampled_action_idx': sampled_action_idx,
-                    'optimal_action_idx': optimal_action_idx,
-                    'sampling_match': sampling_match,
-                    'reward': data['reward'],
-                    'ce_loss': ce_loss_avg,
-                    'entropy': avg_entropy,
-                    'step_loss': total_loss,
-                    'next_state': data['next_state'].tolist(),
-                    'batch_size': batch_size
-                }
-                debug_info['env_steps'].append(step_debug)
-
+        
         if debug:
-            return total_loss, debug_info, beta, timings
-        return total_loss, beta, timings
+            return total_loss, debug_info, beta, timings, ce_loss_avg, entropy_avg
+        return total_loss, beta, timings, ce_loss_avg, entropy_avg
 
     def _get_model_action(self, env_idx, query_state, debug=False):
         """Get action from model given current context and query state."""
@@ -692,14 +740,18 @@ if __name__ == '__main__':
     else:
         experiment_id = str(int(time.time()))
 
+    # Get config base name (without .yaml extension)
+    config_basename = Path(cli_args['config']).stem
+    
     print(f"Experiment ID: {experiment_id}")
+    print(f"Config: {config_basename}")
 
     env = args['env']
     
     # Initialize wandb
     wandb.init(
-        project="dpt-training-online-entropy",
-        name=f"{env}_{experiment_id}",
+        project="dpt-training",
+        name=f"online_{config_basename}",
         config=args,
         id=experiment_id,
         resume="allow",
@@ -725,6 +777,8 @@ if __name__ == '__main__':
     samples_per_iter = args.get('samples_per_iter', 64)
     debug_mode = args.get('debug', False)
     print_every = args.get('print_every', 5)
+    # Batch size for processing environments (default 64 to match offline training)
+    batch_size_envs = args.get('batch_size', 64)
 
     # Beta (entropy penalty) parameters
     confidence_type = args.get('confidence_type', 'linear')
@@ -872,7 +926,7 @@ if __name__ == '__main__':
     if checkpoint_dir is not None and os.path.isdir(checkpoint_dir):
         experiment_dir = checkpoint_dir
     else:
-        experiment_dir = f'models/{env}/{experiment_id}'
+        experiment_dir = f'models/{env}/{config_basename}'
         os.makedirs(experiment_dir, exist_ok=True)
 
     # Save/Update config file in experiment directory (overwrite to reflect resume info)
@@ -905,6 +959,7 @@ if __name__ == '__main__':
         'max_position': max_position,
         'confidence_value': confidence_value,
         'max_context_length': max_context_length,
+        'batch_size': batch_size_envs,  # Add batch size for processing environments
     }
 
     # Create online environment manager with entropy penalty loss
@@ -980,18 +1035,6 @@ if __name__ == '__main__':
     except Exception:
         pass
 
-    # Prepare metrics persistence to preserve curves across resumes
-    metrics_path = os.path.join(experiment_dir, 'metrics.npz')
-    if checkpoint_dir is not None and os.path.exists(metrics_path):
-        try:
-            loaded = np.load(metrics_path, allow_pickle=True)
-            train_loss = list(loaded.get('train_loss', np.array([])).tolist())
-            step_losses = list(loaded.get('step_losses', np.array([])).tolist())
-            beta_schedule = list(loaded.get('beta_schedule', np.array([])).tolist())
-            total_iterations = int(loaded.get('total_iterations', np.array(0)))
-            printw(f"Loaded previous metrics from {metrics_path} (epochs={len(train_loss)}, steps={len(step_losses)})")
-        except Exception as e:
-            printw(f"Warning: Failed to load metrics from {metrics_path}: {e}")
 
     printw(f"Starting online training with entropy penalty (beta schedule: {confidence_type}) for {env}")
     printw(f"Model filename: {filename}")
@@ -1014,6 +1057,8 @@ if __name__ == '__main__':
         env_manager.model = model  # Update model reference
 
         epoch_train_loss = 0.0
+        epoch_ce_loss = 0.0
+        epoch_entropy = 0.0
         epoch_iterations = 0
 
 
@@ -1023,16 +1068,31 @@ if __name__ == '__main__':
             should_debug = debug_mode #and (epoch == 0 and iteration < 10)
             
             if should_debug:
-                iteration_loss, debug_info, beta, timings = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration, debug=True)
+                iteration_loss, debug_info, beta, timings, ce_loss_avg, entropy_avg = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration, debug=True)
                 printw(f"\n=== DEBUG: Epoch {epoch+1}, Iteration {iteration} ===")
             else:
-                iteration_loss, beta, timings = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration)
+                iteration_loss, beta, timings, ce_loss_avg, entropy_avg = env_manager.step_and_learn(optimizer, loss_fn, action_dim, horizon, iteration)
 
             epoch_train_loss += iteration_loss
+            epoch_ce_loss += ce_loss_avg
+            epoch_entropy += entropy_avg
             epoch_iterations += 1
             total_iterations += 1
             step_losses.append(iteration_loss)  # Store step-level loss
             beta_schedule.append(beta)
+            if confidence_type == 'linear_interpolate':
+                alpha = 1.0 - beta
+            else:
+                alpha = 1.0
+            
+            wandb.log({
+                "epoch": resume_epoch_offset + epoch + 1,
+                "train_ce_loss": ce_loss_avg,  # Use consistent naming
+                "train_entropy": entropy_avg,
+                "train_alpha": alpha,
+                "train_beta": beta,
+                "total_loss": iteration_loss,
+            })
 
             if iteration % max(1, print_every) == 0:
                 conf_info = confidence_type
@@ -1046,57 +1106,33 @@ if __name__ == '__main__':
                 actual_context_len = len(env_manager.contexts[0]['states']) if env_manager.contexts else 0
                 printw(f"Epoch {epoch+1}, Iteration {iteration}/{horizon}, Loss: {iteration_loss:.6f}, Beta: {beta:.3f} ({conf_info}) | Context={actual_context_len} | Times: fwd={fwd_time:.1f}ms, env={env_time:.1f}ms, train={train_time:.1f}ms, total={total_time:.1f}ms")
                 
-                # Log step-level metrics to wandb
-                if iteration % max(1, print_every) == 0:
-                    wandb.log({
-                        "epoch": resume_epoch_offset + epoch + 1,
-                        "iteration": iteration,
-                        "step_loss": iteration_loss,
-                        "beta": beta,
-                        "context_length": actual_context_len,
-                        "forward_time_ms": fwd_time,
-                        "env_time_ms": env_time,
-                        "train_time_ms": train_time,
-                        "total_time_ms": total_time,
-                    })
+                    # Calculate alpha (for online with entropy penalty, alpha is typically 1-beta for interpolate, 1 otherwise)
 
-        train_loss.append(epoch_train_loss / epoch_iterations)
-        end_time = time.time()
-        printw(f"\tTrain loss: {train_loss[-1]:.6f}")
-        printw(f"\tTrain time: {end_time - start_time:.2f}s")
-        printw(f"\tTotal iterations: {total_iterations}")
-        printw(f"\tFinal beta: {beta:.3f}")
-        
-        # Log epoch-level metrics to wandb
-        wandb.log({
-            "epoch": resume_epoch_offset + epoch + 1,
-            "epoch_train_loss": train_loss[-1],
-            "epoch_train_time": end_time - start_time,
-            "total_iterations": total_iterations,
-            "final_beta": beta,
-        })
+
+
+
+
 
         # Checkpointing
+        current_epoch = resume_epoch_offset + epoch + 1
         if (epoch + 1) % 1 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
-            torch.save(model.state_dict(), f'{experiment_dir}/epoch{resume_epoch_offset + epoch + 1}.pt')
+            torch.save(model.state_dict(), f'{experiment_dir}/epoch{current_epoch}.pt')
+            
+            # Run evaluation and log plots to wandb (only at certain checkpoints to avoid too much overhead)
+            if (epoch + 1) % 1 == 0 or (epoch + 1) == remaining_epochs:
+                if EVAL_ENABLED and env in ['bandit', 'bandit_bernoulli', 'linear_bandit']:
+                    printw(f"Running evaluation for epoch {current_epoch}, env={env}")
+                    try:
+                        log_evaluation_plots_to_wandb(model, config, args, env, current_epoch)
+                    except Exception as e:
+                        printw(f"Warning: Evaluation failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    printw(f"Evaluation skipped: EVAL_ENABLED={EVAL_ENABLED}, env={env}")
 
-        # LOGGING TO WANDB
-        if (epoch + 1) % 1 == 0:
-            printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
-            printw(f"Train Loss: {train_loss[-1]:.6f}")
-            printw("\n")
 
-            # Persist metrics so future resumes extend curves
-            try:
-                np.savez_compressed(
-                    metrics_path,
-                    train_loss=np.array(train_loss),
-                    step_losses=np.array(step_losses),
-                    beta_schedule=np.array(beta_schedule),
-                    total_iterations=np.array(total_iterations),
-                )
-            except Exception as e:
-                printw(f"Warning: Failed to save metrics to {metrics_path}: {e}")
+
 
     torch.save(model.state_dict(), f'{experiment_dir}/final_model.pt')
     wandb.finish()

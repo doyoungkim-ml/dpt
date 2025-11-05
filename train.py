@@ -14,6 +14,7 @@ import argparse
 import time
 import yaml
 from IPython import embed
+from pathlib import Path
 
 import wandb
 import torch
@@ -37,6 +38,10 @@ from utils import (
 )
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+
+
+from training_eval import log_evaluation_plots_to_wandb
+EVAL_ENABLED = True
 
 
 if __name__ == '__main__':
@@ -69,14 +74,20 @@ if __name__ == '__main__':
     else:
         experiment_id = str(int(time.time()))
 
+    # Get config base name (without .yaml extension)
+    config_basename = Path(cli_args['config']).stem
+    
     print(f"Experiment ID: {experiment_id}")
+    print(f"Config: {config_basename}")
 
     env = args['env']
+    
+    print(f"EVAL_ENABLED: {EVAL_ENABLED}, env: {env}")
     
     # Initialize wandb
     wandb.init(
         project="dpt-training",
-        name=f"{env}_{experiment_id}",
+        name=f"offline_{config_basename}",
         config=args,
         id=experiment_id,
         resume="allow",
@@ -244,7 +255,7 @@ if __name__ == '__main__':
     if checkpoint_dir is not None and os.path.isdir(checkpoint_dir):
         experiment_dir = checkpoint_dir
     else:
-        experiment_dir = f'models/{env}/{experiment_id}'
+        experiment_dir = f'models/{env}/{config_basename}'
         os.makedirs(experiment_dir, exist_ok=True)
 
     # Save/Update config file in experiment directory (overwrite to reflect resume info)
@@ -385,6 +396,7 @@ if __name__ == '__main__':
         start_time = time.time()
         with torch.no_grad():
             epoch_test_loss = 0.0
+            epoch_test_entropy = 0.0
             for i, batch in enumerate(test_loader):
                 print(f"Batch {i} of {len(test_loader)}", end='\r')
                 batch = {k: v.to(device) for k, v in batch.items()}
@@ -397,22 +409,24 @@ if __name__ == '__main__':
 
                 loss = loss_fn(pred_actions, true_actions)
                 epoch_test_loss += loss.item() / horizon
+                
+                # Compute entropy
+                pred_probs = torch.softmax(pred_actions, dim=-1)
+                entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).sum()
+                epoch_test_entropy += entropy.item() / horizon
 
         test_loss.append(epoch_test_loss / len(test_dataset))
+        test_entropy_val = (epoch_test_entropy / len(test_dataset))
         end_time = time.time()
         printw(f"\tTest loss: {test_loss[-1]}")
+        printw(f"\tTest entropy: {test_entropy_val:.4f}")
         printw(f"\tEval time: {end_time - start_time}")
         
-        # Log test metrics to wandb
-        wandb.log({
-            "epoch": resume_epoch_offset + epoch + 1,
-            "test_loss": test_loss[-1],
-            "eval_time": end_time - start_time,
-        })
 
 
         # TRAINING
         epoch_train_loss = 0.0
+        epoch_train_entropy = 0.0
         start_time = time.time()
 
         for i, batch in enumerate(train_loader):
@@ -430,28 +444,55 @@ if __name__ == '__main__':
             loss.backward()
             optimizer.step()
             epoch_train_loss += loss.item() / horizon
+            
+            # Compute entropy
+            pred_probs = torch.softmax(pred_actions, dim=-1)
+            entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).sum()
+            epoch_train_entropy += entropy.item() / horizon
 
         train_loss.append(epoch_train_loss / len(train_dataset))
+        train_entropy_val = (epoch_train_entropy / len(train_dataset))
         end_time = time.time()
         printw(f"\tTrain loss: {train_loss[-1]}")
+        printw(f"\tTrain entropy: {train_entropy_val:.4f}")
         printw(f"\tTrain time: {end_time - start_time}")
         
         # Log training metrics to wandb
         wandb.log({
             "epoch": resume_epoch_offset + epoch + 1,
-            "train_loss": train_loss[-1],
-            "train_time": end_time - start_time,
+            "train_ce_loss": train_loss[-1],  # For offline, CE loss equals total loss
+            "train_entropy": train_entropy_val,
+            "train_alpha": 1.0,  # Offline: alpha = 1
+            "train_beta": 0.0,   # Offline: beta = 0
+            "total_loss": train_loss[-1],
+            "test_loss": test_loss[-1],
+            "test_ce_loss": test_loss[-1],  # For offline, CE loss equals total loss
+            "test_entropy": test_entropy_val,
+            "eval_time": end_time - start_time,
         })
 
 
         # LOGGING
-        if (epoch + 1) % 50 == 0 or (env == 'linear_bandit' and (epoch + 1) % 10 == 0):
+        current_epoch = resume_epoch_offset + epoch + 1
+        if (epoch + 1) % args['eval_every'] == 0:
             torch.save(model.state_dict(),
-                       f'{experiment_dir}/epoch{resume_epoch_offset + epoch + 1}.pt')
+                       f'{experiment_dir}/epoch{current_epoch}.pt')
+            
+            # Run evaluation and log plots to wandb
+            if EVAL_ENABLED and (env in ['bandit', 'bandit_bernoulli', 'linear_bandit'] or env.startswith('darkroom') or env == 'miniworld'):
+                printw(f"Running evaluation for epoch {current_epoch}, env={env}")
+                try:
+                    log_evaluation_plots_to_wandb(model, config, args, env, current_epoch)
+                except Exception as e:
+                    printw(f"Warning: Evaluation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                printw(f"Evaluation skipped: EVAL_ENABLED={EVAL_ENABLED}, env={env}")
 
         # LOGGING TO WANDB
         if (epoch + 1) % 10 == 0:
-            printw(f"Epoch: {resume_epoch_offset + epoch + 1}")
+            printw(f"Epoch: {current_epoch}")
             printw(f"Test Loss:        {test_loss[-1]}")
             printw(f"Train Loss:       {train_loss[-1]}")
             printw("\n")

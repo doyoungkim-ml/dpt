@@ -5,7 +5,7 @@
 #SBATCH --time=48:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=48G
 #SBATCH --gres=gpu:1
 
 # Create logs directory if it doesn't exist
@@ -24,7 +24,7 @@ export NUMEXPR_NUM_THREADS=1
 
 # Run offline training with pre-computed Thompson Sampling distributions
 echo "Starting training with config: $CONFIG_FILE"
-singularity exec --nv --overlay /scratch/dk5268/pytorch-example/dpt.ext3:ro /share/apps/images/cuda12.6.3-cudnn9.5.1-ubuntu22.04.5.sif /bin/bash -c "source /ext3/env.sh; python train_online_entropy_penalty.py --config '$CONFIG_FILE'"
+singularity exec --nv --overlay /scratch/dk5268/pytorch-example/dpt.ext3:ro /scratch/work/public/singularity/cuda12.6.3-cudnn9.5.1-ubuntu22.04.5.sif /bin/bash -c "source /ext3/env.sh; python train_online_entropy_penalty.py --config '$CONFIG_FILE'"
 
 
 # Get the environment type from config

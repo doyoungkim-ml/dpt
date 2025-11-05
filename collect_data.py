@@ -75,10 +75,9 @@ def rollin_linear_bandit_vec(envs):
     _, meta = eval_bandit.deploy_online_vec(vec_env, thmp, H, include_meta=True)
     context_states = meta['context_states']
     context_actions = meta['context_actions']
-    context_next_states = meta['context_next_states']
     context_rewards = meta['context_rewards'][:, :, 0]
 
-    return context_states, context_actions, context_next_states, context_rewards
+    return context_states, context_actions, None, context_rewards
 
 
 def rollin_mdp(env, rollin_type):

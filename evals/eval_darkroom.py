@@ -34,12 +34,22 @@ def deploy_online_vec(vec_env, controller, Heps, H, horizon):
 
     cum_means = []
     for i in range(ctx_rollouts):
-        batch = {
-            'context_states': context_states[:, :i, :, :].reshape(num_envs, -1, vec_env.state_dim),
-            'context_actions': context_actions[:, :i, :].reshape(num_envs, -1, vec_env.action_dim),
-            'context_next_states': context_next_states[:, :i, :, :].reshape(num_envs, -1, vec_env.state_dim),
-            'context_rewards': context_rewards[:, :i, :, :].reshape(num_envs, -1, 1),
-        }
+        # Handle empty context case (i == 0) by creating a dummy single-element sequence
+        if i == 0:
+            # Create dummy context with one element to avoid empty sequence error
+            batch = {
+                'context_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
+                'context_actions': torch.zeros((num_envs, 1, vec_env.action_dim)).float().to(device),
+                'context_next_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
+                'context_rewards': torch.zeros((num_envs, 1, 1)).float().to(device),
+            }
+        else:
+            batch = {
+                'context_states': context_states[:, :i, :, :].reshape(num_envs, -1, vec_env.state_dim),
+                'context_actions': context_actions[:, :i, :].reshape(num_envs, -1, vec_env.action_dim),
+                'context_next_states': context_next_states[:, :i, :, :].reshape(num_envs, -1, vec_env.state_dim),
+                'context_rewards': context_rewards[:, :i, :, :].reshape(num_envs, -1, 1),
+            }
         controller.set_batch(batch)
         states_lnr, actions_lnr, next_states_lnr, rewards_lnr = vec_env.deploy_eval(
             controller)

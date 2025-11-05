@@ -17,8 +17,9 @@ online_training: true
 n_epoch: 100
 seed: 1
 
-confidence_type: constant
-confidence_value: 0.0
+confidence_type: reward_prediction_error
+alpha: 1.0  # Scaling factor for normalized prediction error
+beta_max: 0.5  # Maximum beta value to prevent over-exploration
 
 # Evaluation configuration
 n_eval: 2000

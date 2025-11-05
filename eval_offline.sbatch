@@ -14,6 +14,6 @@
 mkdir -p logs
 
 # Run offline evaluation with config file and model path
-python eval.py --config "$1" --model_path "$2"
+singularity exec --nv --overlay /scratch/dk5268/pytorch-example/dpt.ext3:ro /scratch/work/public/singularity/cuda12.6.3-cudnn9.5.1-ubuntu22.04.5.sif /bin/bash -c "source /ext3/env.sh; python eval.py --config '$1' --model_path '$2'"
 
 echo "Offline evaluation completed"

@@ -18,5 +18,10 @@ dropout: 0
 shuffle: false
 
 # Training configuration
-chutney: 100
+chutney: 2000
 seed: 1
+
+# Evaluation configuration
+n_eval: 100
+test_cov: -1.0
+eval_every: 50

@@ -40,9 +40,13 @@ class DarkroomTransformerController(Controller):
             states = states[None, :]
         self.batch['query_states'] = states
 
-        actions = self.model(self.batch).cpu().detach().numpy()
+        # Model returns (pred_actions, pred_rewards) tuple, unpack it
+        pred_actions, _ = self.model(self.batch)
+        # Extract predictions at the last position
         if self.batch_size == 1:
-            actions = actions[0]
+            actions = pred_actions[0, -1, :].cpu().detach().numpy()
+        else:
+            actions = pred_actions[:, -1, :].cpu().detach().numpy()
 
         if self.sample:
             if self.batch_size > 1:

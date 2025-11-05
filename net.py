@@ -68,6 +68,15 @@ class Transformer(nn.Module):
         batch_size = context_states.shape[0]
         seq_len = context_states.shape[1]
         
+        # Handle empty sequence case (shouldn't happen, but guard against it)
+        if seq_len == 0:
+            # Create dummy single-element sequence
+            device = context_states.device
+            context_states = torch.zeros((batch_size, 1, self.state_dim), device=device)
+            context_actions = torch.zeros((batch_size, 1, self.action_dim), device=device)
+            context_rewards = torch.zeros((batch_size, 1, 1), device=device)
+            seq_len = 1
+        
         # Embed each modality separately
         state_embeds = self.embed_state(context_states)  # [batch, seq_len, n_embd]
         action_embeds = self.embed_action(context_actions)  # [batch, seq_len, n_embd]
@@ -168,6 +177,18 @@ class ImageTransformer(Transformer):
 
         batch_size = context_images.shape[0]
         seq_len = context_images.shape[1]
+
+        # Handle empty sequence case (shouldn't happen, but guard against it)
+        if seq_len == 0:
+            # Create dummy single-element sequence
+            device = context_images.device
+            # Infer image shape from config if available, otherwise use 3-channel default
+            image_size = self.config.get('image_size', 25)
+            context_images = torch.zeros((batch_size, 1, 3, image_size, image_size), device=device)
+            context_states = torch.zeros((batch_size, 1, self.state_dim), device=device)
+            context_actions = torch.zeros((batch_size, 1, self.action_dim), device=device)
+            context_rewards = torch.zeros((batch_size, 1, 1), device=device)
+            seq_len = 1
 
         # Encode images
         image_seq = context_images.view(-1, *context_images.size()[2:])

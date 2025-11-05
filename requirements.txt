@@ -9,3 +9,4 @@ opencv-python==4.7.0.72
 matplotlib==3.6.2
 wandb
 packaging
+gymnasium

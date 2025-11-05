@@ -2,7 +2,7 @@
 # Reward Prediction Error Schedule: β = α * min(|r_actual - r_predicted| / (std(r) + ε), β_max)
 # Beta is based on how wrong the model is about rewards
 env: "bandit"
-envs: 10000
+envs: 5000
 hists: 1
 samples: 1
 H: 100

@@ -1,7 +1,12 @@
 # Offline training configuration for bandit environment
-env: "miniworld"
-envs: 2000
+env: "bandit"
+envs: 5000
+hists: 1
+samples: 1
 H: 100
+dim: 10
+var: 0.3
+cov: 0.0
 
 # Model configuration
 embd: 32
@@ -12,9 +17,10 @@ dropout: 0
 shuffle: true
 
 # Training configuration
-chutney: 1000
+chutney: 2000
 seed: 1
 
 # Evaluation configuration
 n_eval: 100
+test_cov: -1.0
 eval_every: 50

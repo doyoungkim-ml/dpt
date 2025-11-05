@@ -1,10 +1,10 @@
 # Online training configuration for bandit environment
 env: "bandit"
-envs: 10000
+envs: 5000
 hists: 1
 samples: 1
 H: 100
-dim: 5
+dim: 10
 var: 0.3
 cov: 0.0
 
@@ -18,17 +18,9 @@ shuffle: true
 
 # Online training configuration
 online_training: true
-n_epoch: 100
+n_epoch: 50
 seed: 1
 
-# Context length cap to prevent quadratic scaling (default: 1024)
-# Set to 1024 for full context. Training will be slower but uses gradient checkpointing for efficiency.
-max_context_length: 1024
-print_every: 5
-
-# Evaluation configuration
-n_eval: 100
-test_cov: -1.0
 
 # ========================================
 # Entropy penalty coefficient (beta) scheduling
@@ -56,6 +48,10 @@ test_cov: -1.0
 confidence_type: constant
 confidence_value: 0.0
 
+
+# Evaluation configuration
+n_eval: 100
+test_cov: -1.0
 # PRINCIPLED SCHEDULES (mathematically grounded, adaptive):
 # ----------------------------------------------------------
 

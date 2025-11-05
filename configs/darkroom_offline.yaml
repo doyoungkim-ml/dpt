@@ -1,6 +1,6 @@
 # Offline training configuration for bandit environment
 env: "darkroom_heldout"
-envs: 2000
+envs: 10000
 H: 100
 dim: 10
 
@@ -13,5 +13,10 @@ dropout: 0
 shuffle: true
 
 # Training configuration
-chutney: 1000
+chutney: 2000
+seed: 1
+
+# Evaluation configuration
+n_eval: 100
+eval_every: 50
 seed: 1
