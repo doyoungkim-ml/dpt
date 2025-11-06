@@ -22,6 +22,7 @@ mkdir -p logs
 
 echo "Starting offline training with config: $CONFIG_FILE"
 
+python collect_data.py --config "$CONFIG_FILE"
 # Run offline training
 python train.py --config "$CONFIG_FILE"
 

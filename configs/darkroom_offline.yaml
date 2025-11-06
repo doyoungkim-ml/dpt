@@ -19,4 +19,5 @@ seed: 1
 # Evaluation configuration
 n_eval: 100
 eval_every: 50
+ctx_rollouts: 1
 seed: 1

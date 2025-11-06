@@ -26,85 +26,54 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.ba
 _baseline_cache = {}
 
 
-def _deploy_online_vec_with_state_tracking_darkroom(vec_env, controller, Heps, H, horizon):
+def _deploy_online_vec_with_state_tracking_darkroom(vec_env, controller, ctx_rollouts, H, horizon):
     """
     Wrapper around deploy_online_vec that also tracks visited states for darkroom.
     Returns (cumulative_means, state_visits) where state_visits is a dict mapping
     (env_idx, episode_idx) -> list of visited states (2D coordinates).
+    
+    For darkroom evaluation: runs ctx_rollouts separate episodes for each environment.
+    Each rollout starts with empty context, accumulates context during the rollout (up to H steps),
+    then resets for the next rollout.
     """
     from evals.eval_darkroom import deploy_online_vec
     from utils import convert_to_tensor
     
-    assert H % horizon == 0
-    ctx_rollouts = H // horizon
-    
     num_envs = vec_env.num_envs
     state_visits = defaultdict(list)  # (env_idx, episode) -> list of states
     
-    context_states = torch.zeros(
-        (num_envs, ctx_rollouts, horizon, vec_env.state_dim)).float().to(device)
-    context_actions = torch.zeros(
-        (num_envs, ctx_rollouts, horizon, vec_env.action_dim)).float().to(device)
-    context_next_states = torch.zeros(
-        (num_envs, ctx_rollouts, horizon, vec_env.state_dim)).float().to(device)
-    context_rewards = torch.zeros(
-        (num_envs, ctx_rollouts, horizon, 1)).float().to(device)
+    # Store step-level rewards across all rollouts
+    # Shape: (num_envs, ctx_rollouts, horizon) - rewards at each step for each rollout
+    step_rewards = []
+    # Store states and actions for visualization
+    # Shape: (num_envs, ctx_rollouts, horizon, 2) for states, (num_envs, ctx_rollouts, horizon, 5) for actions
+    rollout_states = []
+    rollout_actions = []
     
-    cum_means = []
-    episode_idx = 0
-    
-    for i in range(ctx_rollouts):
-        if i == 0:
-            batch = {
-                'context_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
-                'context_actions': torch.zeros((num_envs, 1, vec_env.action_dim)).float().to(device),
-                'context_next_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
-                'context_rewards': torch.zeros((num_envs, 1, 1)).float().to(device),
-            }
-        else:
-            batch = {
-                'context_states': context_states[:, :i, :, :].reshape(num_envs, -1, vec_env.state_dim),
-                'context_actions': context_actions[:, :i, :].reshape(num_envs, -1, vec_env.action_dim),
-                'context_next_states': context_next_states[:, :i, :, :].reshape(num_envs, -1, vec_env.state_dim),
-                'context_rewards': context_rewards[:, :i, :, :].reshape(num_envs, -1, 1),
-            }
-        controller.set_batch(batch)
-        states_lnr, actions_lnr, next_states_lnr, rewards_lnr = vec_env.deploy_eval(controller)
+    # Run ctx_rollouts separate episodes - each rollout is independent with its own context
+    for episode_idx in range(ctx_rollouts):
+        # Each rollout starts with empty context
+        # The context will accumulate during the rollout via deploy_online_vec
+        # Use deploy_online_vec which handles context accumulation within a single rollout
+        # We need to manually step through horizon steps to accumulate context
         
-        # Track states for this episode - include both obs and next_obs to get all visited states
-        states_lnr_np = states_lnr if isinstance(states_lnr, np.ndarray) else states_lnr.cpu().numpy()
-        next_states_lnr_np = next_states_lnr if isinstance(next_states_lnr, np.ndarray) else next_states_lnr.cpu().numpy()
-        for env_idx in range(num_envs):
-            # Combine obs and next_obs to get all visited states
-            all_states = states_lnr_np[env_idx].tolist()
-            # Add the final next_obs state if it's different from the last obs
-            if len(next_states_lnr_np[env_idx]) > 0:
-                final_next_state = next_states_lnr_np[env_idx][-1].tolist()
-                if len(all_states) == 0 or all_states[-1] != final_next_state:
-                    all_states.append(final_next_state)
-            state_visits[(env_idx, episode_idx)].extend(all_states)
-        
-        context_states[:, i, :, :] = convert_to_tensor(states_lnr)
-        context_actions[:, i, :, :] = convert_to_tensor(actions_lnr)
-        context_next_states[:, i, :, :] = convert_to_tensor(next_states_lnr)
-        context_rewards[:, i, :, :] = convert_to_tensor(rewards_lnr[:, :, None])
-        
-        cum_means.append(np.sum(rewards_lnr, axis=-1))
-        episode_idx += 1
-    
-    for _ in range(ctx_rollouts, Heps):
+        # Start with empty context
         batch = {
-            'context_states': context_states.reshape(num_envs, -1, vec_env.state_dim),
-            'context_actions': context_actions.reshape(num_envs, -1, vec_env.action_dim),
-            'context_next_states': context_next_states.reshape(num_envs, -1, vec_env.state_dim),
-            'context_rewards': context_rewards.reshape(num_envs, -1, 1),
+            'context_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
+            'context_actions': torch.zeros((num_envs, 1, vec_env.action_dim)).float().to(device),
+            'context_next_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
+            'context_rewards': torch.zeros((num_envs, 1, 1)).float().to(device),
         }
         controller.set_batch(batch)
+        
+        # Deploy for this rollout - context accumulates during the rollout
         states_lnr, actions_lnr, next_states_lnr, rewards_lnr = vec_env.deploy_eval(controller)
         
         # Track states for this episode - include both obs and next_obs to get all visited states
         states_lnr_np = states_lnr if isinstance(states_lnr, np.ndarray) else states_lnr.cpu().numpy()
         next_states_lnr_np = next_states_lnr if isinstance(next_states_lnr, np.ndarray) else next_states_lnr.cpu().numpy()
+        actions_lnr_np = actions_lnr if isinstance(actions_lnr, np.ndarray) else actions_lnr.cpu().numpy()
+        
         for env_idx in range(num_envs):
             # Combine obs and next_obs to get all visited states
             all_states = states_lnr_np[env_idx].tolist()
@@ -115,26 +84,32 @@ def _deploy_online_vec_with_state_tracking_darkroom(vec_env, controller, Heps, H
                     all_states.append(final_next_state)
             state_visits[(env_idx, episode_idx)].extend(all_states)
         
-        mean = np.sum(rewards_lnr, axis=-1)
-        cum_means.append(mean)
-        
-        states_lnr = convert_to_tensor(states_lnr)
-        actions_lnr = convert_to_tensor(actions_lnr)
-        next_states_lnr = convert_to_tensor(next_states_lnr)
-        rewards_lnr = convert_to_tensor(rewards_lnr[:, :, None])
-        
-        context_states = torch.cat(
-            (context_states[:, 1:, :, :], states_lnr[:, None, :, :]), dim=1)
-        context_actions = torch.cat(
-            (context_actions[:, 1:, :, :], actions_lnr[:, None, :, :]), dim=1)
-        context_next_states = torch.cat(
-            (context_next_states[:, 1:, :, :], next_states_lnr[:, None, :, :]), dim=1)
-        context_rewards = torch.cat(
-            (context_rewards[:, 1:, :, :], rewards_lnr[:, None, :, :]), dim=1)
-        
-        episode_idx += 1
+        # Store step-level rewards for this rollout
+        # rewards_lnr has shape (num_envs, horizon) - rewards at each step
+        step_rewards.append(rewards_lnr)
+        # Store states and actions for visualization
+        rollout_states.append(states_lnr_np)  # Shape: (num_envs, horizon, 2)
+        rollout_actions.append(actions_lnr_np)  # Shape: (num_envs, horizon, 5)
     
-    return np.stack(cum_means, axis=1), state_visits
+    # Stack to get shape (num_envs, ctx_rollouts, horizon)
+    step_rewards = np.stack(step_rewards, axis=1)
+    rollout_states = np.stack(rollout_states, axis=1)  # Shape: (num_envs, ctx_rollouts, horizon, 2)
+    rollout_actions = np.stack(rollout_actions, axis=1)  # Shape: (num_envs, ctx_rollouts, horizon, 5)
+    
+    # Average across rollouts and environments to get step-level performance
+    # Shape: (horizon,) - average reward at each step across all environments and rollouts
+    step_rewards_mean = np.mean(step_rewards, axis=(0, 1))  # Average over envs and rollouts
+    step_rewards_sem = scipy.stats.sem(step_rewards.reshape(-1, horizon), axis=0)  # SEM across all (env, rollout) pairs
+    
+    # Also return cumulative means for backward compatibility (average across rollouts)
+    cum_means = np.sum(step_rewards, axis=-1)  # Shape: (num_envs, ctx_rollouts)
+    
+    # Average step-level rewards across rollouts for each environment (for individual trajectories)
+    # Shape: (num_envs, horizon) - average step reward for each environment across all rollouts
+    step_rewards_per_env = np.mean(step_rewards, axis=1)
+    
+    return (np.stack(cum_means, axis=1), state_visits, step_rewards_mean, step_rewards_sem, step_rewards_per_env, 
+            step_rewards, rollout_states, rollout_actions)
 
 
 def _deploy_online_vec_with_state_tracking_miniworld(vec_env, controller, Heps, H, horizon, learner=False):
@@ -347,7 +322,7 @@ def _track_positions_during_deployment_miniworld(vec_env, controller, Heps, H, h
     return np.stack(cum_means, axis=1), state_visits
 
 
-def _visualize_state_exploration(state_visits, grid_dim, n_eval, Heps, title_prefix="State Exploration"):
+def _visualize_state_exploration(state_visits, grid_dim, n_eval, Heps, title_prefix="State Exploration", simple=False):
     """
     Create visualization of state space exploration over episodes.
     
@@ -357,6 +332,7 @@ def _visualize_state_exploration(state_visits, grid_dim, n_eval, Heps, title_pre
         n_eval: number of environments
         Heps: number of episodes
         title_prefix: prefix for plot titles
+        simple: if True, show only one figure with all visits aggregated
     
     Returns:
         matplotlib figure
@@ -369,10 +345,6 @@ def _visualize_state_exploration(state_visits, grid_dim, n_eval, Heps, title_pre
     
     # Aggregate visits across all environments and episodes
     visit_counts = np.zeros(grid_size)
-    visit_counts_early = np.zeros(grid_size)  # First half of episodes
-    visit_counts_late = np.zeros(grid_size)   # Second half of episodes
-    
-    mid_episode = Heps // 2
     
     for (env_idx, episode_idx), positions in state_visits.items():
         for pos in positions:
@@ -385,34 +357,204 @@ def _visualize_state_exploration(state_visits, grid_dim, n_eval, Heps, title_pre
             x = max(0, min(x, grid_size[0] - 1))
             y = max(0, min(y, grid_size[1] - 1))
             visit_counts[x, y] += 1
-            if episode_idx < mid_episode:
-                visit_counts_early[x, y] += 1
+    
+    if simple:
+        # Simple single figure
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+        im = ax.imshow(visit_counts.T, origin='lower', cmap='viridis', aspect='auto')
+        ax.set_title(f'{title_prefix}')
+        ax.set_xlabel('X coordinate')
+        ax.set_ylabel('Y coordinate')
+        plt.colorbar(im, ax=ax, label='Visit count')
+        plt.tight_layout()
+        return fig
+    else:
+        # Original three-panel figure
+        visit_counts_early = np.zeros(grid_size)  # First half of episodes
+        visit_counts_late = np.zeros(grid_size)   # Second half of episodes
+        
+        mid_episode = Heps // 2
+        
+        for (env_idx, episode_idx), positions in state_visits.items():
+            for pos in positions:
+                x, y = pos[0], pos[1]
+                x = int(round(x))
+                y = int(round(y))
+                x = max(0, min(x, grid_size[0] - 1))
+                y = max(0, min(y, grid_size[1] - 1))
+                if episode_idx < mid_episode:
+                    visit_counts_early[x, y] += 1
+                else:
+                    visit_counts_late[x, y] += 1
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # Overall exploration
+        im1 = axes[0].imshow(visit_counts.T, origin='lower', cmap='viridis', aspect='auto')
+        axes[0].set_title(f'{title_prefix}: All Episodes')
+        axes[0].set_xlabel('X coordinate')
+        axes[0].set_ylabel('Y coordinate')
+        plt.colorbar(im1, ax=axes[0], label='Visit count')
+        
+        # Early episodes
+        im2 = axes[1].imshow(visit_counts_early.T, origin='lower', cmap='viridis', aspect='auto')
+        axes[1].set_title(f'{title_prefix}: Early Episodes (0-{mid_episode-1})')
+        axes[1].set_xlabel('X coordinate')
+        axes[1].set_ylabel('Y coordinate')
+        plt.colorbar(im2, ax=axes[1], label='Visit count')
+        
+        # Late episodes
+        im3 = axes[2].imshow(visit_counts_late.T, origin='lower', cmap='viridis', aspect='auto')
+        axes[2].set_title(f'{title_prefix}: Late Episodes ({mid_episode}-{Heps-1})')
+        axes[2].set_xlabel('X coordinate')
+        axes[2].set_ylabel('Y coordinate')
+        plt.colorbar(im3, ax=axes[2], label='Visit count')
+        
+        plt.tight_layout()
+        return fig
+
+
+def _visualize_rollout_path_single_ax(ax, states, actions, goal, dim, title="Rollout Path"):
+    """
+    Visualize a single rollout path through the 2D grid on a given axis.
+    
+    Args:
+        ax: matplotlib axis to plot on
+        states: Array of shape (horizon, 2) - states visited during rollout
+        actions: Array of shape (horizon, 5) - actions taken during rollout
+        goal: Tuple (gx, gy) - goal position
+        dim: Grid dimension
+        title: Plot title
+    """
+    # Create grid - all cells are light grey (value 0.5) for background
+    grid = np.ones((dim, dim)) * 0.5  # Light grey background for all cells
+    
+    # Mark goal position with darker grey
+    # Note: grid is transposed with .T when displayed, so we use (goal_y, goal_x) to match scatter coordinates
+    goal_x, goal_y = int(goal[0]), int(goal[1])
+    grid[goal_y, goal_x] = 0.8  # Goal has darker grey value (using transposed coordinates)
+    
+    # Plot the path
+    states_array = np.array(states)
+    if len(states_array.shape) == 2 and states_array.shape[1] == 2:
+        # Plot path
+        path_x = states_array[:, 0]
+        path_y = states_array[:, 1]
+        
+        # Plot path with arrows showing movement direction
+        for i in range(len(path_x) - 1):
+            x1, y1 = int(path_x[i]), int(path_y[i])
+            x2, y2 = int(path_x[i+1]), int(path_y[i+1])
+            
+            # Only draw arrow if there's actual movement
+            if x1 != x2 or y1 != y2:
+                # Draw arrow
+                ax.arrow(y1, x1, y2-y1, x2-x1, head_width=0.2, head_length=0.2, 
+                        fc='blue', ec='blue', alpha=0.6, length_includes_head=True)
+        
+        # Mark start position
+        start_x, start_y = int(path_x[0]), int(path_y[0])
+        ax.scatter([start_y], [start_x], color='green', s=200, marker='o', 
+                  label='Start', zorder=5)
+        
+        # Mark goal position
+        ax.scatter([goal_y], [goal_x], color='red', s=200, marker='*', 
+                  label='Goal', zorder=5)
+        
+        # Mark visited states
+        for i in range(len(path_x)):
+            x, y = int(path_x[i]), int(path_y[i])
+            if i == 0:
+                continue  # Already marked as start
+            elif x == goal_x and y == goal_y:
+                continue  # Already marked as goal
             else:
-                visit_counts_late[x, y] += 1
+                ax.scatter([y], [x], color='blue', s=30, alpha=0.5, zorder=3)
     
-    # Create figure with subplots
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    # Show grid - light grey background for all cells, darker grey for goal
+    ax.imshow(grid.T, origin='lower', cmap='Greys', alpha=0.3)
+    ax.set_xlim(-0.5, dim - 0.5)
+    ax.set_ylim(-0.5, dim - 0.5)
+    ax.set_xticks(np.arange(dim))
+    ax.set_yticks(np.arange(dim))
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('Y coordinate')
+    ax.set_ylabel('X coordinate')
+    ax.set_title(title, fontsize=10)
+    if ax == ax.get_figure().axes[0]:  # Only add legend to first subplot
+        ax.legend(fontsize=8)
+
+
+def _visualize_rollout_path(states, actions, goal, dim, title="Rollout Path"):
+    """
+    Visualize a single rollout path through the 2D grid.
     
-    # Overall exploration
-    im1 = axes[0].imshow(visit_counts.T, origin='lower', cmap='viridis', aspect='auto')
-    axes[0].set_title(f'{title_prefix}: All Episodes')
-    axes[0].set_xlabel('X coordinate')
-    axes[0].set_ylabel('Y coordinate')
-    plt.colorbar(im1, ax=axes[0], label='Visit count')
+    Args:
+        states: Array of shape (horizon, 2) - states visited during rollout
+        actions: Array of shape (horizon, 5) - actions taken during rollout
+        goal: Tuple (gx, gy) - goal position
+        dim: Grid dimension
+        title: Plot title
     
-    # Early episodes
-    im2 = axes[1].imshow(visit_counts_early.T, origin='lower', cmap='viridis', aspect='auto')
-    axes[1].set_title(f'{title_prefix}: Early Episodes (0-{mid_episode-1})')
-    axes[1].set_xlabel('X coordinate')
-    axes[1].set_ylabel('Y coordinate')
-    plt.colorbar(im2, ax=axes[1], label='Visit count')
+    Returns:
+        matplotlib figure
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
     
-    # Late episodes
-    im3 = axes[2].imshow(visit_counts_late.T, origin='lower', cmap='viridis', aspect='auto')
-    axes[2].set_title(f'{title_prefix}: Late Episodes ({mid_episode}-{Heps-1})')
-    axes[2].set_xlabel('X coordinate')
-    axes[2].set_ylabel('Y coordinate')
-    plt.colorbar(im3, ax=axes[2], label='Visit count')
+    # Create grid
+    grid = np.zeros((dim, dim))
+    
+    # Mark goal position
+    goal_x, goal_y = int(goal[0]), int(goal[1])
+    grid[goal_x, goal_y] = 2  # Goal has special value
+    
+    # Plot the path
+    states_array = np.array(states)
+    if len(states_array.shape) == 2 and states_array.shape[1] == 2:
+        # Plot path
+        path_x = states_array[:, 0]
+        path_y = states_array[:, 1]
+        
+        # Plot path with arrows showing movement direction
+        for i in range(len(path_x) - 1):
+            x1, y1 = int(path_x[i]), int(path_y[i])
+            x2, y2 = int(path_x[i+1]), int(path_y[i+1])
+            
+            # Draw arrow
+            ax.arrow(y1, x1, y2-y1, x2-x1, head_width=0.2, head_length=0.2, 
+                    fc='blue', ec='blue', alpha=0.6, length_includes_head=True)
+        
+        # Mark start position
+        start_x, start_y = int(path_x[0]), int(path_y[0])
+        ax.scatter([start_y], [start_x], color='green', s=200, marker='o', 
+                  label='Start', zorder=5)
+        
+        # Mark goal position
+        ax.scatter([goal_y], [goal_x], color='red', s=200, marker='*', 
+                  label='Goal', zorder=5)
+        
+        # Mark visited states
+        for i in range(len(path_x)):
+            x, y = int(path_x[i]), int(path_y[i])
+            if i == 0:
+                continue  # Already marked as start
+            elif x == goal_x and y == goal_y:
+                continue  # Already marked as goal
+            else:
+                ax.scatter([y], [x], color='blue', s=50, alpha=0.5, zorder=3)
+    
+    # Show grid
+    ax.imshow(grid.T, origin='lower', cmap='Greys', alpha=0.3)
+    ax.set_xlim(-0.5, dim - 0.5)
+    ax.set_ylim(-0.5, dim - 0.5)
+    ax.set_xticks(np.arange(dim))
+    ax.set_yticks(np.arange(dim))
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('Y coordinate')
+    ax.set_ylabel('X coordinate')
+    ax.set_title(title)
+    ax.legend()
     
     plt.tight_layout()
     return fig
@@ -829,11 +971,13 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
     results = {}
     
     # Darkroom evaluation parameters
-    Heps = 40
-    H = args.get('H', 100)
+    H = args.get('H', 100)  # Context window size (for reference, but not used in independent rollouts)
+    horizon = args.get('H', 100)  # Fixed episode length (same as training)
+    ctx_rollouts = args.get('ctx_rollouts', 40)  # Number of separate independent rollouts per environment
+    # Note: Each rollout is independent - context starts empty for each rollout and accumulates during that rollout
     
     # Create cache key for baselines
-    cache_key = f'darkroom_{n_eval}_{Heps}_{H}_{horizon}_{dim}_{permuted}'
+    cache_key = f'darkroom_{n_eval}_{ctx_rollouts}_{H}_{horizon}_{dim}_{permuted}'
     
     # Create environments dynamically (like bandits)
     from ctrls.ctrl_darkroom import DarkroomOptPolicy, DarkroomTransformerController
@@ -862,56 +1006,177 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
         baseline_data = _baseline_cache[cache_key]
         lnr_means = baseline_data['lnr'].copy()
         state_visits = baseline_data.get('state_visits', {})
-        if not state_visits:
+        step_rewards_mean = baseline_data.get('step_rewards_mean', None)
+        step_rewards_sem = baseline_data.get('step_rewards_sem', None)
+        if not state_visits or step_rewards_mean is None:
             # Need to recompute with state tracking
             print("Recomputing with state tracking...")
             lnr_controller = DarkroomTransformerController(model, batch_size=n_eval, sample=True)
-            lnr_means, state_visits = _deploy_online_vec_with_state_tracking_darkroom(
-                vec_env, lnr_controller, Heps, H, horizon)
+            lnr_means, state_visits, step_rewards_mean, step_rewards_sem, step_rewards_per_env, step_rewards, rollout_states, rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
+                vec_env, lnr_controller, ctx_rollouts, H, horizon)
             baseline_data['state_visits'] = state_visits
+            baseline_data['step_rewards_mean'] = step_rewards_mean
+            baseline_data['step_rewards_sem'] = step_rewards_sem
+            baseline_data['step_rewards_per_env'] = step_rewards_per_env
+            baseline_data['step_rewards'] = step_rewards
+            baseline_data['rollout_states'] = rollout_states
+            baseline_data['rollout_actions'] = rollout_actions
+        else:
+            step_rewards_per_env = baseline_data.get('step_rewards_per_env')
+            step_rewards = baseline_data.get('step_rewards')
+            rollout_states = baseline_data.get('rollout_states')
+            rollout_actions = baseline_data.get('rollout_actions')
+            if step_rewards_per_env is None or step_rewards is None:
+                # Need to recompute
+                print("Recomputing step rewards per env...")
+                lnr_controller = DarkroomTransformerController(model, batch_size=n_eval, sample=True)
+                _, _, _, _, step_rewards_per_env, step_rewards, rollout_states, rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
+                    vec_env, lnr_controller, ctx_rollouts, H, horizon)
+                baseline_data['step_rewards_per_env'] = step_rewards_per_env
+                baseline_data['step_rewards'] = step_rewards
+                baseline_data['rollout_states'] = rollout_states
+                baseline_data['rollout_actions'] = rollout_actions
     else:
         print(f"Computing baselines for {cache_key}")
         # Get learner results with state tracking
         lnr_controller = DarkroomTransformerController(model, batch_size=n_eval, sample=True)
-        lnr_means, state_visits = _deploy_online_vec_with_state_tracking_darkroom(
-            vec_env, lnr_controller, Heps, H, horizon)
-        _baseline_cache[cache_key] = {'lnr': lnr_means.copy(), 'state_visits': state_visits}
+        lnr_means, state_visits, step_rewards_mean, step_rewards_sem, step_rewards_per_env, step_rewards, rollout_states, rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
+            vec_env, lnr_controller, ctx_rollouts, H, horizon)
+        _baseline_cache[cache_key] = {
+            'lnr': lnr_means.copy(), 
+            'state_visits': state_visits,
+            'step_rewards_mean': step_rewards_mean,
+            'step_rewards_sem': step_rewards_sem,
+            'step_rewards_per_env': step_rewards_per_env,
+            'step_rewards': step_rewards,
+            'rollout_states': rollout_states,
+            'rollout_actions': rollout_actions
+        }
     
-    # Calculate means
+    # Calculate means (lnr_means has shape (n_eval, ctx_rollouts))
+    num_episodes = ctx_rollouts  # ctx_rollouts separate episodes
     lnr_means_mean = np.mean(lnr_means, axis=0)
     lnr_means_sem = scipy.stats.sem(lnr_means, axis=0)
     
     # Store raw data for wandb
-    episode_indices = np.arange(Heps)
+    episode_indices = np.arange(num_episodes)
+    step_indices = np.arange(horizon)
     results['online_data'] = {
-        'learner': {'episode': episode_indices, 'mean': lnr_means_mean, 'sem': lnr_means_sem}
+        'learner': {'episode': episode_indices, 'mean': lnr_means_mean, 'sem': lnr_means_sem},
+        'learner_step': {'step': step_indices, 'mean': step_rewards_mean, 'sem': step_rewards_sem}
     }
     
-    # Create online plot
+    # Create online plot - step-level performance showing context accumulation
     fig_online, ax = plt.subplots(1, 1, figsize=(10, 6))
     
-    # Plot individual trajectories
+    # Plot individual trajectories (first 10 environments, averaged across rollouts)
+    # step_rewards_per_env has shape (n_eval, horizon) - step-level rewards for each environment
     for i in range(min(n_eval, 10)):
-        ax.plot(lnr_means[i], color='blue', alpha=0.1)
+        ax.plot(step_rewards_per_env[i], color='blue', alpha=0.1)
     
-    # Plot means with error bars
-    ax.plot(lnr_means_mean, label='Learner', color='blue', linewidth=2)
-    ax.fill_between(episode_indices, lnr_means_mean - lnr_means_sem, 
-                    lnr_means_mean + lnr_means_sem, alpha=0.2, color='blue')
+    # Plot 5 sample individual rollouts (cumulative returns)
+    # step_rewards has shape (n_eval, ctx_rollouts, horizon)
+    # Sample 5 random (env, rollout) pairs
+    np.random.seed(42)  # For reproducibility
+    sample_indices = []
+    for _ in range(min(5, n_eval * ctx_rollouts)):
+        env_idx = np.random.randint(0, n_eval)
+        rollout_idx = np.random.randint(0, ctx_rollouts)
+        sample_indices.append((env_idx, rollout_idx))
     
-    ax.set_xlabel('Episodes')
-    ax.set_ylabel('Average Return')
-    ax.set_title(f'Online Evaluation on {n_eval} Envs')
-    ax.legend()
+    # Different colors for each rollout
+    rollout_colors = ['orange', 'purple', 'brown', 'pink', 'cyan']
+    
+    # Store actions for sample rollouts for wandb logging
+    sample_rollout_actions = []
+    
+    # Plot cumulative returns for sample rollouts
+    # Add small offset to avoid log(0) issues
+    log_offset = 0.1
+    
+    for i, (env_idx, rollout_idx) in enumerate(sample_indices):
+        # Calculate cumulative return for this rollout
+        rollout_rewards = step_rewards[env_idx, rollout_idx, :]  # Shape: (horizon,)
+        cumulative_returns = np.cumsum(rollout_rewards)
+        color = rollout_colors[i % len(rollout_colors)]
+        
+        # Add offset for log scale
+        cumulative_returns_log = cumulative_returns + log_offset
+        ax.plot(cumulative_returns_log, color=color, alpha=0.6, linewidth=1.5, 
+               linestyle='--', label=f'Rollout {i+1}' if i < 5 else '')
+        
+        # Store actions for this rollout
+        if rollout_actions is not None:
+            actions = rollout_actions[env_idx, rollout_idx, :, :]  # Shape: (horizon, 5)
+            # Convert one-hot actions to action indices
+            action_indices = np.argmax(actions, axis=-1)  # Shape: (horizon,)
+            sample_rollout_actions.append({
+                'env_idx': int(env_idx),
+                'rollout_idx': int(rollout_idx),
+                'actions': action_indices.tolist(),
+                'cumulative_return': float(np.sum(rollout_rewards))
+            })
+    
+    # Plot means with error bars - step-level performance (cumulative)
+    cumulative_returns_mean = np.cumsum(step_rewards_mean)
+    # Add offset for log scale
+    cumulative_returns_mean_log = cumulative_returns_mean + log_offset
+    
+    ax.plot(cumulative_returns_mean_log, label='Learner (mean cumulative)', color='blue', linewidth=2)
+    
+    # Compute cumulative SEM (simplified - actual would need proper propagation)
+    cumulative_sem = np.cumsum(step_rewards_sem)
+    ax.fill_between(step_indices, 
+                    cumulative_returns_mean_log - cumulative_sem, 
+                    cumulative_returns_mean_log + cumulative_sem, 
+                    alpha=0.2, color='blue')
+    
+    ax.set_xlabel('Step (Context Accumulation)')
+    ax.set_ylabel('Cumulative Return (log scale, offset=0.1)')
+    ax.set_yscale('log')  # Use logarithmic scale
+    ax.set_title(f'Step-Level Performance During Context Accumulation (n={n_eval} envs, {ctx_rollouts} rollouts)')
+    ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     results['online_fig'] = fig_online
     
-    # Create state exploration visualization
+    # Create path visualizations for sample rollouts
+    if rollout_states is not None and rollout_actions is not None and len(sample_indices) > 0:
+        # Create a figure with 5 subplots showing sample rollout paths
+        num_samples = min(5, len(sample_indices))
+        fig_paths, axes = plt.subplots(1, num_samples, figsize=(5*num_samples, 5))
+        if num_samples == 1:
+            axes = [axes]
+        
+        for idx, (env_idx, rollout_idx) in enumerate(sample_indices[:num_samples]):
+            ax = axes[idx]
+            # Get states and goal for this rollout
+            states = rollout_states[env_idx, rollout_idx, :, :]  # Shape: (horizon, 2)
+            actions = rollout_actions[env_idx, rollout_idx, :, :]  # Shape: (horizon, 5)
+            
+            # Get goal for this environment
+            if permuted:
+                goal = np.array([dim - 1, dim - 1])
+            else:
+                goal = envs[env_idx].goal
+            
+            # Visualize path
+            _visualize_rollout_path_single_ax(ax, states, actions, goal, dim, 
+                                             f'Rollout {idx+1} (Env {env_idx}, Rollout {rollout_idx})')
+        
+        plt.tight_layout()
+        results['path_fig'] = fig_paths
+    
+    # Store sample rollout actions for wandb logging
+    if sample_rollout_actions:
+        results['sample_rollout_actions'] = sample_rollout_actions
+    
+    # Create state exploration visualization - simple single figure showing exploration
     if state_visits:
         fig_exploration = _visualize_state_exploration(
-            state_visits, dim, n_eval, Heps, title_prefix="Darkroom State Exploration")
+            state_visits, dim, n_eval, num_episodes, 
+            title_prefix="Darkroom State Exploration", simple=True)
         results['exploration_fig'] = fig_exploration
     
     model.train()
@@ -1173,7 +1438,30 @@ def log_evaluation_plots_to_wandb(model, config, args, envname, epoch):
             wandb.log({f"eval/state_exploration": wandb.Image(results['exploration_fig'])}, commit=False)
             plt.close(results['exploration_fig'])
         
-        # 4. Log rollout inference data for a few environments (only for bandits)
+        # 4. Path visualization (for darkroom)
+        if 'path_fig' in results:
+            wandb.log({f"eval/path_visualization": wandb.Image(results['path_fig'])}, commit=False)
+            plt.close(results['path_fig'])
+        
+        # 5. Log sample rollout actions (for darkroom)
+        if envname.startswith('darkroom') and 'sample_rollout_actions' in results:
+            sample_actions = results['sample_rollout_actions']
+            if sample_actions:
+                # Create a table with actions for each sample rollout
+                columns = ['env_idx', 'rollout_idx', 'cumulative_return', 'actions']
+                table_data = []
+                for action_data in sample_actions:
+                    # Convert actions list to string for display
+                    actions_str = ', '.join(map(str, action_data['actions']))
+                    table_data.append([
+                        action_data['env_idx'],
+                        action_data['rollout_idx'],
+                        f"{action_data['cumulative_return']:.2f}",
+                        actions_str
+                    ])
+                wandb.log({f"eval/sample_rollout_actions": wandb.Table(columns=columns, data=table_data)}, commit=False)
+        
+        # 6. Log rollout inference data for a few environments (only for bandits)
         if envname in ['bandit', 'bandit_bernoulli', 'linear_bandit']:
             # Create environments for rollout collection
             from envs.bandit_env import BanditEnv, LinearBanditEnv
