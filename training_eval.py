@@ -57,6 +57,10 @@ def _deploy_online_vec_with_state_tracking_darkroom(vec_env, controller, ctx_rol
         # Use deploy_online_vec which handles context accumulation within a single rollout
         # We need to manually step through horizon steps to accumulate context
         
+        # Reset controller state if it has a reset method (for policies like zigzag)
+        if hasattr(controller, 'reset'):
+            controller.reset()
+        
         # Start with empty context
         batch = {
             'context_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
@@ -980,7 +984,7 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
     cache_key = f'darkroom_{n_eval}_{ctx_rollouts}_{H}_{horizon}_{dim}_{permuted}'
     
     # Create environments dynamically (like bandits)
-    from ctrls.ctrl_darkroom import DarkroomOptPolicy, DarkroomTransformerController
+    from ctrls.ctrl_darkroom import DarkroomOptPolicy, DarkroomTransformerController, DarkroomZigzagPolicy
     from envs.darkroom_env import DarkroomEnv, DarkroomEnvPermuted, DarkroomEnvVec
     from evals.eval_darkroom import deploy_online_vec
     
@@ -1000,70 +1004,36 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
     
     vec_env = DarkroomEnvVec(envs)
     
-    # Check cache for baselines or compute them
-    if cache_key in _baseline_cache:
-        print(f"Using cached baselines for {cache_key}")
-        baseline_data = _baseline_cache[cache_key]
-        lnr_means = baseline_data['lnr'].copy()
-        state_visits = baseline_data.get('state_visits', {})
-        step_rewards_mean = baseline_data.get('step_rewards_mean', None)
-        step_rewards_sem = baseline_data.get('step_rewards_sem', None)
-        if not state_visits or step_rewards_mean is None:
-            # Need to recompute with state tracking
-            print("Recomputing with state tracking...")
-            lnr_controller = DarkroomTransformerController(model, batch_size=n_eval, sample=True)
-            lnr_means, state_visits, step_rewards_mean, step_rewards_sem, step_rewards_per_env, step_rewards, rollout_states, rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
-                vec_env, lnr_controller, ctx_rollouts, H, horizon)
-            baseline_data['state_visits'] = state_visits
-            baseline_data['step_rewards_mean'] = step_rewards_mean
-            baseline_data['step_rewards_sem'] = step_rewards_sem
-            baseline_data['step_rewards_per_env'] = step_rewards_per_env
-            baseline_data['step_rewards'] = step_rewards
-            baseline_data['rollout_states'] = rollout_states
-            baseline_data['rollout_actions'] = rollout_actions
-        else:
-            step_rewards_per_env = baseline_data.get('step_rewards_per_env')
-            step_rewards = baseline_data.get('step_rewards')
-            rollout_states = baseline_data.get('rollout_states')
-            rollout_actions = baseline_data.get('rollout_actions')
-            if step_rewards_per_env is None or step_rewards is None:
-                # Need to recompute
-                print("Recomputing step rewards per env...")
-                lnr_controller = DarkroomTransformerController(model, batch_size=n_eval, sample=True)
-                _, _, _, _, step_rewards_per_env, step_rewards, rollout_states, rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
-                    vec_env, lnr_controller, ctx_rollouts, H, horizon)
-                baseline_data['step_rewards_per_env'] = step_rewards_per_env
-                baseline_data['step_rewards'] = step_rewards
-                baseline_data['rollout_states'] = rollout_states
-                baseline_data['rollout_actions'] = rollout_actions
-    else:
-        print(f"Computing baselines for {cache_key}")
-        # Get learner results with state tracking
-        lnr_controller = DarkroomTransformerController(model, batch_size=n_eval, sample=True)
-        lnr_means, state_visits, step_rewards_mean, step_rewards_sem, step_rewards_per_env, step_rewards, rollout_states, rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
-            vec_env, lnr_controller, ctx_rollouts, H, horizon)
-        _baseline_cache[cache_key] = {
-            'lnr': lnr_means.copy(), 
-            'state_visits': state_visits,
-            'step_rewards_mean': step_rewards_mean,
-            'step_rewards_sem': step_rewards_sem,
-            'step_rewards_per_env': step_rewards_per_env,
-            'step_rewards': step_rewards,
-            'rollout_states': rollout_states,
-            'rollout_actions': rollout_actions
-        }
+    # Always recompute learner results (model changes during training)
+    # Note: There are no static baselines for darkroom to cache, so we always compute fresh learner results
+    print(f"Computing fresh learner results for darkroom evaluation (model is at current training state)")
+    lnr_controller = DarkroomTransformerController(model, batch_size=n_eval, sample=True)
+    lnr_means, state_visits, step_rewards_mean, step_rewards_sem, step_rewards_per_env, step_rewards, rollout_states, rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
+        vec_env, lnr_controller, ctx_rollouts, H, horizon)
+    
+    # Compute zigzag baseline (always fresh, but deterministic)
+    print(f"Computing zigzag baseline for darkroom evaluation")
+    zigzag_controller = DarkroomZigzagPolicy(envs, batch_size=n_eval)
+    zigzag_means, zigzag_state_visits, zigzag_step_rewards_mean, zigzag_step_rewards_sem, zigzag_step_rewards_per_env, zigzag_step_rewards, zigzag_rollout_states, zigzag_rollout_actions = _deploy_online_vec_with_state_tracking_darkroom(
+        vec_env, zigzag_controller, ctx_rollouts, H, horizon)
     
     # Calculate means (lnr_means has shape (n_eval, ctx_rollouts))
     num_episodes = ctx_rollouts  # ctx_rollouts separate episodes
     lnr_means_mean = np.mean(lnr_means, axis=0)
     lnr_means_sem = scipy.stats.sem(lnr_means, axis=0)
     
+    # Calculate zigzag means
+    zigzag_means_mean = np.mean(zigzag_means, axis=0)
+    zigzag_means_sem = scipy.stats.sem(zigzag_means, axis=0)
+    
     # Store raw data for wandb
     episode_indices = np.arange(num_episodes)
     step_indices = np.arange(horizon)
     results['online_data'] = {
         'learner': {'episode': episode_indices, 'mean': lnr_means_mean, 'sem': lnr_means_sem},
-        'learner_step': {'step': step_indices, 'mean': step_rewards_mean, 'sem': step_rewards_sem}
+        'learner_step': {'step': step_indices, 'mean': step_rewards_mean, 'sem': step_rewards_sem},
+        'zigzag': {'episode': episode_indices, 'mean': zigzag_means_mean, 'sem': zigzag_means_sem},
+        'zigzag_step': {'step': step_indices, 'mean': zigzag_step_rewards_mean, 'sem': zigzag_step_rewards_sem}
     }
     
     # Create online plot - step-level performance showing context accumulation
@@ -1073,6 +1043,7 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
     # step_rewards_per_env has shape (n_eval, horizon) - step-level rewards for each environment
     for i in range(min(n_eval, 10)):
         ax.plot(step_rewards_per_env[i], color='blue', alpha=0.1)
+        ax.plot(zigzag_step_rewards_per_env[i], color='green', alpha=0.1)
     
     # Plot 5 sample individual rollouts (cumulative returns)
     # step_rewards has shape (n_eval, ctx_rollouts, horizon)
@@ -1122,7 +1093,12 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
     # Add offset for log scale
     cumulative_returns_mean_log = cumulative_returns_mean + log_offset
     
+    # Plot zigzag baseline
+    zigzag_cumulative_returns_mean = np.cumsum(zigzag_step_rewards_mean)
+    zigzag_cumulative_returns_mean_log = zigzag_cumulative_returns_mean + log_offset
+    
     ax.plot(cumulative_returns_mean_log, label='Learner (mean cumulative)', color='blue', linewidth=2)
+    ax.plot(zigzag_cumulative_returns_mean_log, label='Zigzag Baseline (mean cumulative)', color='green', linewidth=2, linestyle='--')
     
     # Compute cumulative SEM (simplified - actual would need proper propagation)
     cumulative_sem = np.cumsum(step_rewards_sem)
@@ -1130,6 +1106,12 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
                     cumulative_returns_mean_log - cumulative_sem, 
                     cumulative_returns_mean_log + cumulative_sem, 
                     alpha=0.2, color='blue')
+    
+    zigzag_cumulative_sem = np.cumsum(zigzag_step_rewards_sem)
+    ax.fill_between(step_indices,
+                    zigzag_cumulative_returns_mean_log - zigzag_cumulative_sem,
+                    zigzag_cumulative_returns_mean_log + zigzag_cumulative_sem,
+                    alpha=0.2, color='green')
     
     ax.set_xlabel('Step (Context Accumulation)')
     ax.set_ylabel('Cumulative Return (log scale, offset=0.1)')
@@ -1448,17 +1430,19 @@ def log_evaluation_plots_to_wandb(model, config, args, envname, epoch):
             sample_actions = results['sample_rollout_actions']
             if sample_actions:
                 # Create a table with actions for each sample rollout
-                columns = ['env_idx', 'rollout_idx', 'cumulative_return', 'actions']
+                columns = ['epoch', 'env_idx', 'rollout_idx', 'cumulative_return', 'actions']
                 table_data = []
                 for action_data in sample_actions:
                     # Convert actions list to string for display
                     actions_str = ', '.join(map(str, action_data['actions']))
                     table_data.append([
+                        epoch,
                         action_data['env_idx'],
                         action_data['rollout_idx'],
                         f"{action_data['cumulative_return']:.2f}",
                         actions_str
                     ])
+                # Epoch is already a column in the table
                 wandb.log({f"eval/sample_rollout_actions": wandb.Table(columns=columns, data=table_data)}, commit=False)
         
         # 6. Log rollout inference data for a few environments (only for bandits)
@@ -1476,9 +1460,13 @@ def log_evaluation_plots_to_wandb(model, config, args, envname, epoch):
             
             rollouts = _collect_rollout_data(model, envs, eval_trajs, envname, horizon, var)
             if rollouts:
-                # Convert rollouts to table format
-                columns = list(rollouts[0].keys())
-                table_data = [[row.get(col) for col in columns] for row in rollouts]
+                # Convert rollouts to table format - add epoch column
+                columns = ['epoch'] + list(rollouts[0].keys())
+                table_data = []
+                for row in rollouts:
+                    table_row = [epoch] + [row.get(col) for col in rollouts[0].keys()]
+                    table_data.append(table_row)
+                # Epoch is already a column in the table
                 wandb.log({f"eval/rollouts": wandb.Table(columns=columns, data=table_data)}, commit=False)
         
         print("Evaluation plots logged to wandb")
