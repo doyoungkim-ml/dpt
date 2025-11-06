@@ -434,10 +434,7 @@ def _visualize_rollout_path_single_ax(ax, states, actions, goal, dim, title="Rol
     # Create grid - all cells are light grey (value 0.5) for background
     grid = np.ones((dim, dim)) * 0.5  # Light grey background for all cells
     
-    # Mark goal position with darker grey
-    # Note: grid is transposed with .T when displayed, so we use (goal_y, goal_x) to match scatter coordinates
     goal_x, goal_y = int(goal[0]), int(goal[1])
-    grid[goal_y, goal_x] = 0.8  # Goal has darker grey value (using transposed coordinates)
     
     # Plot the path
     states_array = np.array(states)
@@ -454,16 +451,16 @@ def _visualize_rollout_path_single_ax(ax, states, actions, goal, dim, title="Rol
             # Only draw arrow if there's actual movement
             if x1 != x2 or y1 != y2:
                 # Draw arrow
-                ax.arrow(y1, x1, y2-y1, x2-x1, head_width=0.2, head_length=0.2, 
+                ax.arrow(x1, y1, x2-x1, y2-y1, head_width=0.2, head_length=0.2, 
                         fc='blue', ec='blue', alpha=0.6, length_includes_head=True)
         
         # Mark start position
         start_x, start_y = int(path_x[0]), int(path_y[0])
-        ax.scatter([start_y], [start_x], color='green', s=200, marker='o', 
+        ax.scatter([start_x], [start_y], color='green', s=200, marker='o', 
                   label='Start', zorder=5)
         
         # Mark goal position
-        ax.scatter([goal_y], [goal_x], color='red', s=200, marker='*', 
+        ax.scatter([goal_x], [goal_y], color='red', s=200, marker='*', 
                   label='Goal', zorder=5)
         
         # Mark visited states
@@ -474,17 +471,17 @@ def _visualize_rollout_path_single_ax(ax, states, actions, goal, dim, title="Rol
             elif x == goal_x and y == goal_y:
                 continue  # Already marked as goal
             else:
-                ax.scatter([y], [x], color='blue', s=30, alpha=0.5, zorder=3)
+                ax.scatter([x], [y], color='blue', s=30, alpha=0.5, zorder=3)
     
-    # Show grid - light grey background for all cells, darker grey for goal
-    ax.imshow(grid.T, origin='lower', cmap='Greys', alpha=0.3)
+    # Show grid - light grey background for all cells
+    ax.imshow(grid, origin='lower', cmap='Greys', alpha=0.3)
     ax.set_xlim(-0.5, dim - 0.5)
     ax.set_ylim(-0.5, dim - 0.5)
     ax.set_xticks(np.arange(dim))
     ax.set_yticks(np.arange(dim))
     ax.grid(True, alpha=0.3)
-    ax.set_xlabel('Y coordinate')
-    ax.set_ylabel('X coordinate')
+    ax.set_xlabel('X coordinate')
+    ax.set_ylabel('Y coordinate')
     ax.set_title(title, fontsize=10)
     if ax == ax.get_figure().axes[0]:  # Only add legend to first subplot
         ax.legend(fontsize=8)
@@ -509,9 +506,7 @@ def _visualize_rollout_path(states, actions, goal, dim, title="Rollout Path"):
     # Create grid
     grid = np.zeros((dim, dim))
     
-    # Mark goal position
     goal_x, goal_y = int(goal[0]), int(goal[1])
-    grid[goal_x, goal_y] = 2  # Goal has special value
     
     # Plot the path
     states_array = np.array(states)
@@ -526,16 +521,16 @@ def _visualize_rollout_path(states, actions, goal, dim, title="Rollout Path"):
             x2, y2 = int(path_x[i+1]), int(path_y[i+1])
             
             # Draw arrow
-            ax.arrow(y1, x1, y2-y1, x2-x1, head_width=0.2, head_length=0.2, 
+            ax.arrow(x1, y1, x2-x1, y2-y1, head_width=0.2, head_length=0.2, 
                     fc='blue', ec='blue', alpha=0.6, length_includes_head=True)
         
         # Mark start position
         start_x, start_y = int(path_x[0]), int(path_y[0])
-        ax.scatter([start_y], [start_x], color='green', s=200, marker='o', 
+        ax.scatter([start_x], [start_y], color='green', s=200, marker='o', 
                   label='Start', zorder=5)
         
         # Mark goal position
-        ax.scatter([goal_y], [goal_x], color='red', s=200, marker='*', 
+        ax.scatter([goal_x], [goal_y], color='red', s=200, marker='*', 
                   label='Goal', zorder=5)
         
         # Mark visited states
@@ -546,17 +541,17 @@ def _visualize_rollout_path(states, actions, goal, dim, title="Rollout Path"):
             elif x == goal_x and y == goal_y:
                 continue  # Already marked as goal
             else:
-                ax.scatter([y], [x], color='blue', s=50, alpha=0.5, zorder=3)
+                ax.scatter([x], [y], color='blue', s=50, alpha=0.5, zorder=3)
     
     # Show grid
-    ax.imshow(grid.T, origin='lower', cmap='Greys', alpha=0.3)
+    ax.imshow(grid, origin='lower', cmap='Greys', alpha=0.3)
     ax.set_xlim(-0.5, dim - 0.5)
     ax.set_ylim(-0.5, dim - 0.5)
     ax.set_xticks(np.arange(dim))
     ax.set_yticks(np.arange(dim))
     ax.grid(True, alpha=0.3)
-    ax.set_xlabel('Y coordinate')
-    ax.set_ylabel('X coordinate')
+    ax.set_xlabel('X coordinate')
+    ax.set_ylabel('Y coordinate')
     ax.set_title(title)
     ax.legend()
     
@@ -1065,6 +1060,10 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
     # Add small offset to avoid log(0) issues
     log_offset = 0.1
     
+    # Debug: Print states and actions for sampled rollouts
+    print(f"\nDebug: {len(sample_indices)} sampled rollouts during evaluation:")
+    action_names = {0: "right", 1: "left", 2: "up", 3: "down", 4: "stay"}
+    
     for i, (env_idx, rollout_idx) in enumerate(sample_indices):
         # Calculate cumulative return for this rollout
         rollout_rewards = step_rewards[env_idx, rollout_idx, :]  # Shape: (horizon,)
@@ -1077,10 +1076,36 @@ def evaluate_darkroom_model(model, config, args, n_eval, horizon, dim, permuted=
                linestyle='--', label=f'Rollout {i+1}' if i < 5 else '')
         
         # Store actions for this rollout
-        if rollout_actions is not None:
+        if rollout_actions is not None and rollout_states is not None:
             actions = rollout_actions[env_idx, rollout_idx, :, :]  # Shape: (horizon, 5)
+            states = rollout_states[env_idx, rollout_idx, :, :]  # Shape: (horizon, 2)
             # Convert one-hot actions to action indices
             action_indices = np.argmax(actions, axis=-1)  # Shape: (horizon,)
+            
+            # Get goal for this environment
+            if permuted:
+                goal = np.array([dim - 1, dim - 1])
+            else:
+                goal = envs[env_idx].goal
+            
+            # Format states and actions for debug output
+            context_strs = []
+            for h in range(min(horizon, 100)):  # Show first 50 steps
+                state = states[h]
+                policy_action_idx = action_indices[h]  # Action policy took
+                optimal_action = envs[env_idx].opt_action(state)  # Optimal action for this state
+                optimal_action_idx = np.argmax(optimal_action)
+                policy_action_name = action_names.get(policy_action_idx, f"action_{policy_action_idx}")
+                optimal_action_name = action_names.get(optimal_action_idx, f"action_{optimal_action_idx}")
+                context_strs.append(f"{tuple(state)}: {policy_action_name} (opt: {optimal_action_name})")
+            
+            if horizon > 100:
+                context_strs.append("...")
+            
+            goal_str = f"Goal state: {tuple(goal)}"
+            context_str = ", ".join(context_strs)
+            print(f"  Rollout {i+1} (Env {env_idx}, Rollout {rollout_idx}): {goal_str}, context: {context_str}")
+            
             sample_rollout_actions.append({
                 'env_idx': int(env_idx),
                 'rollout_idx': int(rollout_idx),

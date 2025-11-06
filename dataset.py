@@ -32,6 +32,7 @@ class Dataset(torch.utils.data.Dataset):
         context_rewards = []
         query_states = []
         optimal_actions = []
+        optimal_actions_per_state = []  # NEW: optimal actions for each context state (for MDPs)
 
         for traj in self.trajs:
             context_states.append(traj['context_states'])
@@ -42,7 +43,16 @@ class Dataset(torch.utils.data.Dataset):
             context_rewards.append(traj['context_rewards'])
 
             query_states.append(traj['query_state'])
-            optimal_actions.append(traj['optimal_action'])
+            
+            # Check if optimal_actions (plural) exists - this is for MDPs where each state has its own optimal action
+            if 'optimal_actions' in traj:
+                optimal_actions_per_state.append(traj['optimal_actions'])
+                # Also keep single optimal_action for backward compatibility
+                optimal_actions.append(traj.get('optimal_action', traj['optimal_actions'][0]))
+            else:
+                # Fall back to single optimal_action (for bandit environments)
+                optimal_actions.append(traj['optimal_action'])
+                optimal_actions_per_state.append(None)
 
         context_states = np.array(context_states)
         context_actions = np.array(context_actions)
@@ -55,6 +65,21 @@ class Dataset(torch.utils.data.Dataset):
             context_rewards = context_rewards[:, :, None]
         query_states = np.array(query_states)
         optimal_actions = np.array(optimal_actions)
+        
+        # Convert optimal_actions_per_state to array if at least one trajectory has it
+        # If all trajectories have it, convert to array; otherwise keep as None
+        has_optimal_actions_per_state = any(x is not None for x in optimal_actions_per_state)
+        if has_optimal_actions_per_state:
+            # Check if all trajectories have it (for consistent batching)
+            all_have_it = all(x is not None for x in optimal_actions_per_state)
+            if all_have_it:
+                optimal_actions_per_state = np.array(optimal_actions_per_state)
+            else:
+                # Mixed case: some have it, some don't - set to None to avoid issues
+                # In practice, this shouldn't happen if we're consistent about MDP vs bandit
+                optimal_actions_per_state = None
+        else:
+            optimal_actions_per_state = None
 
         self.dataset = {
             'query_states': convert_to_tensor(query_states, store_gpu=self.store_gpu),
@@ -68,6 +93,12 @@ class Dataset(torch.utils.data.Dataset):
             self.dataset['context_next_states'] = convert_to_tensor(context_next_states, store_gpu=self.store_gpu)
         else:
             self.dataset['context_next_states'] = None
+            
+        # Store optimal_actions_per_state if available (for MDPs)
+        if optimal_actions_per_state is not None:
+            self.dataset['optimal_actions_per_state'] = convert_to_tensor(optimal_actions_per_state, store_gpu=self.store_gpu)
+        else:
+            self.dataset['optimal_actions_per_state'] = None
 
         self.zeros = np.zeros(
             config['state_dim'] ** 2 + config['action_dim'] + 1
@@ -91,6 +122,10 @@ class Dataset(torch.utils.data.Dataset):
         
         if self.dataset['context_next_states'] is not None:
             res['context_next_states'] = self.dataset['context_next_states'][index]
+            
+        # Add optimal_actions_per_state if available (for MDPs)
+        if self.dataset['optimal_actions_per_state'] is not None:
+            res['optimal_actions_per_state'] = self.dataset['optimal_actions_per_state'][index]
 
         if self.shuffle:
             perm = torch.randperm(self.horizon)
@@ -99,6 +134,9 @@ class Dataset(torch.utils.data.Dataset):
             res['context_rewards'] = res['context_rewards'][perm]
             if 'context_next_states' in res:
                 res['context_next_states'] = res['context_next_states'][perm]
+            # Also shuffle optimal_actions_per_state if available
+            if 'optimal_actions_per_state' in res:
+                res['optimal_actions_per_state'] = res['optimal_actions_per_state'][perm]
 
         return res
 

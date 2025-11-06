@@ -196,12 +196,22 @@ def generate_mdp_histories_from_envs(envs, n_hists, n_samples, rollin_type):
                 context_rewards,
             ) = rollin_mdp(env, rollin_type=rollin_type)
             for k in range(n_samples):
+                # For MDPs, compute optimal action for each state in the context sequence
+                # This is state-dependent: each state gets its own optimal action
+                horizon = len(context_states)
+                optimal_actions = np.array([
+                    env.opt_action(context_states[h]) 
+                    for h in range(horizon)
+                ])  # Shape: (horizon, action_dim)
+                
+                # Also keep query_state for backward compatibility (though not used in training)
                 query_state = env.sample_state()
-                optimal_action = env.opt_action(query_state)
+                query_optimal_action = env.opt_action(query_state)
 
                 traj = {
-                    'query_state': query_state,
-                    'optimal_action': optimal_action,
+                    'query_state': query_state,  # Kept for backward compatibility
+                    'optimal_action': query_optimal_action,  # Kept for backward compatibility
+                    'optimal_actions': optimal_actions,  # NEW: optimal actions for each context state
                     'context_states': context_states,
                     'context_actions': context_actions,
                     'context_next_states': context_next_states,

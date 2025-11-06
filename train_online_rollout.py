@@ -23,6 +23,8 @@ from torchvision.transforms import transforms
 
 import numpy as np
 import random
+import matplotlib.pyplot as plt
+import scipy.stats
 
 import common_args
 from dataset import Dataset, ImageDataset
@@ -50,12 +52,81 @@ from training_eval import log_evaluation_plots_to_wandb
 EVAL_ENABLED = True
 
 
+def _visualize_rollout_path_single_ax(ax, states, actions, goal, dim, title="Rollout Path"):
+    """
+    Visualize a single rollout path through the 2D grid on a given axis.
+    
+    Args:
+        ax: matplotlib axis to plot on
+        states: Array of shape (horizon, 2) - states visited during rollout
+        actions: Array of shape (horizon, 5) - actions taken during rollout
+        goal: Tuple (gx, gy) - goal position
+        dim: Grid dimension
+        title: Plot title
+    """
+    # Create grid - all cells are light grey (value 0.5) for background
+    grid = np.ones((dim, dim)) * 0.5  # Light grey background for all cells
+    
+    goal_x, goal_y = int(goal[0]), int(goal[1])
+    
+    # Plot the path
+    states_array = np.array(states)
+    if len(states_array.shape) == 2 and states_array.shape[1] == 2:
+        # Plot path
+        path_x = states_array[:, 0]
+        path_y = states_array[:, 1]
+        
+        # Plot path with arrows showing movement direction
+        for i in range(len(path_x) - 1):
+            x1, y1 = int(path_x[i]), int(path_y[i])
+            x2, y2 = int(path_x[i+1]), int(path_y[i+1])
+            
+            # Only draw arrow if there's actual movement
+            if x1 != x2 or y1 != y2:
+                # Draw arrow
+                ax.arrow(x1, y1, x2-x1, y2-y1, head_width=0.2, head_length=0.2, 
+                        fc='blue', ec='blue', alpha=0.6, length_includes_head=True)
+        
+        # Mark start position
+        start_x, start_y = int(path_x[0]), int(path_y[0])
+        ax.scatter([start_x], [start_y], color='green', s=200, marker='o', 
+                  label='Start', zorder=5)
+        
+        # Mark goal position
+        ax.scatter([goal_x], [goal_y], color='red', s=200, marker='*', 
+                  label='Goal', zorder=5)
+        
+        # Mark visited states
+        for i in range(len(path_x)):
+            x, y = int(path_x[i]), int(path_y[i])
+            if i == 0:
+                continue  # Already marked as start
+            elif x == goal_x and y == goal_y:
+                continue  # Already marked as goal
+            else:
+                ax.scatter([x], [y], color='blue', s=30, alpha=0.5, zorder=3)
+    
+    # Show grid - light grey background for all cells
+    ax.imshow(grid, origin='lower', cmap='Greys', alpha=0.3)
+    ax.set_xlim(-0.5, dim - 0.5)
+    ax.set_ylim(-0.5, dim - 0.5)
+    ax.set_xticks(np.arange(dim))
+    ax.set_yticks(np.arange(dim))
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('X coordinate')
+    ax.set_ylabel('Y coordinate')
+    ax.set_title(title, fontsize=10)
+    if ax == ax.get_figure().axes[0]:  # Only add legend to first subplot
+        ax.legend(fontsize=8)
+
+
 def collect_rollout_data_bandit(model, envs, horizon, n_hists, n_samples, sample_action=True):
     """
     Collect rollout data using the current model for bandit environments.
+    Uses the same vectorized rollout approach as evaluation code.
     
     Args:
-        model: The current model (or None for random rollout)
+        model: The current model (always required, even if randomly initialized)
         envs: List of bandit environments
         horizon: Context horizon
         n_hists: Number of histories per environment
@@ -66,18 +137,33 @@ def collect_rollout_data_bandit(model, envs, horizon, n_hists, n_samples, sample
     """
     trajs = []
     
-    # Create controller (will be reused for all environments)
-    controller = None
-    if model is not None:
-        controller = BanditTransformerController(model, sample=sample_action, batch_size=1)
+    # Set model to eval mode for inference
+    model.eval()
     
-    for env_idx, env in enumerate(envs):
-        for j in range(n_hists):
-            # Roll out one history
-            context_states, context_actions, _, context_rewards = _rollout_bandit_single(
-                env, controller, horizon
-            )
-            
+    # Create vectorized environment
+    vec_env = bandit_env.BanditEnvVec(envs)
+    num_envs = len(envs)
+    
+    # Create controller with batch_size matching number of environments
+    controller = BanditTransformerController(model, sample=sample_action, batch_size=num_envs)
+    
+    # Note: deploy_online_vec will print its own progress messages
+    # Collect n_hists histories for all environments at once
+    for j in range(n_hists):
+        if n_hists > 1:
+            print(f"  History {j+1}/{n_hists}...")
+            import sys
+            sys.stdout.flush()
+        
+        # Use deploy_online_vec to collect rollouts for all environments at once
+        _, meta = eval_bandit.deploy_online_vec(vec_env, controller, horizon, include_meta=True)
+        
+        context_states = meta['context_states']  # Shape: (num_envs, horizon, dx)
+        context_actions = meta['context_actions']  # Shape: (num_envs, horizon, du)
+        context_rewards = meta['context_rewards'][:, :, 0]  # Shape: (num_envs, horizon)
+        
+        # Create trajectories for each environment
+        for env_idx, env in enumerate(envs):
             # Create n_samples trajectories with the same context
             for k in range(n_samples):
                 query_state = np.array([1])
@@ -86,92 +172,65 @@ def collect_rollout_data_bandit(model, envs, horizon, n_hists, n_samples, sample
                 traj = {
                     'query_state': query_state,
                     'optimal_action': optimal_action,
-                    'context_states': context_states,
-                    'context_actions': context_actions,
-                    'context_rewards': context_rewards,
+                    'context_states': context_states[env_idx],  # Shape: (horizon, dx)
+                    'context_actions': context_actions[env_idx],  # Shape: (horizon, du)
+                    'context_rewards': context_rewards[env_idx],  # Shape: (horizon,)
                     'means': env.means,
                 }
                 trajs.append(traj)
     
+    print(f"\n  Collected {len(trajs)} trajectories total")
+    import sys
+    sys.stdout.flush()
     return trajs
-
-
-def _rollout_bandit_single(env, controller, horizon):
-    """
-    Roll out a single history for a bandit environment.
-    """
-    xs, us, xps, rs = [], [], [], []
-    
-    # If no controller, use random actions
-    if controller is None:
-        for h in range(horizon):
-            x = np.array([1])
-            u = np.zeros(env.dim)
-            i = np.random.choice(np.arange(env.dim))
-            u[i] = 1.0
-            xp, r = env.transit(x, u)
-            
-            xs.append(x)
-            us.append(u)
-            xps.append(xp)
-            rs.append(r)
-    else:
-        # Use model controller
-        # Create context as we go
-        context_states_np = np.zeros((1, horizon, env.dx))
-        context_actions_np = np.zeros((1, horizon, env.du))
-        context_rewards_np = np.zeros((1, horizon, 1))
-        
-        for h in range(horizon):
-            # Prepare batch with accumulated context
-            batch = {
-                'context_states': context_states_np[:, :h, :],
-                'context_actions': context_actions_np[:, :h, :],
-                'context_rewards': context_rewards_np[:, :h, :],
-            }
-            controller.set_batch_numpy_vec(batch)
-            
-            # Get action from controller
-            x = np.array([1])
-            # act_numpy_vec expects batch input, returns batch output
-            u_batch = controller.act_numpy_vec(x[None, :])  # Shape: (1, action_dim)
-            u = u_batch[0]  # Get single action
-            
-            # Execute in environment
-            xp, r = env.transit(x, u)
-            
-            # Store transition
-            xs.append(x)
-            us.append(u)
-            xps.append(xp)
-            rs.append(r)
-            
-            # Update context for next step
-            context_states_np[0, h, :] = x
-            context_actions_np[0, h, :] = u
-            context_rewards_np[0, h, 0] = r
-    
-    xs, us, xps, rs = np.array(xs), np.array(us), np.array(xps), np.array(rs)
-    return xs, us, xps, rs
 
 
 def collect_rollout_data_linear_bandit(model, envs, horizon, n_hists, n_samples, arms, sample_action=True):
     """
     Collect rollout data using the current model for linear bandit environments.
+    Uses the same vectorized rollout approach as evaluation code.
+    
+    Args:
+        model: The current model (always required, even if randomly initialized)
+        envs: List of linear bandit environments
+        horizon: Context horizon
+        n_hists: Number of histories per environment
+        n_samples: Number of samples per history
+        arms: Fixed arm features for linear bandits
+        sample_action: Whether to sample actions from the model
+        
+    Returns:
+        List of trajectories in the format expected by Dataset
     """
     trajs = []
     
-    # Create controller (will be reused for all environments)
-    controller = None
-    if model is not None:
-        controller = BanditTransformerController(model, sample=sample_action, batch_size=1)
+    # Set model to eval mode for inference
+    model.eval()
     
-    for env_idx, env in enumerate(envs):
-        for j in range(n_hists):
-            context_states, context_actions, _, context_rewards = _rollout_bandit_single(
-                env, controller, horizon
-            )
-            
+    # Create vectorized environment
+    vec_env = bandit_env.BanditEnvVec(envs)
+    num_envs = len(envs)
+    
+    # Create controller with batch_size matching number of environments
+    controller = BanditTransformerController(model, sample=sample_action, batch_size=num_envs)
+    
+    # Collect n_hists histories for all environments at once
+    for j in range(n_hists):
+        if n_hists > 1:
+            print(f"  History {j+1}/{n_hists}...")
+            import sys
+            sys.stdout.flush()
+        
+        # Use deploy_online_vec to collect rollouts for all environments at once
+        # Note: deploy_online_vec will print its own progress messages
+        _, meta = eval_bandit.deploy_online_vec(vec_env, controller, horizon, include_meta=True)
+        
+        context_states = meta['context_states']  # Shape: (num_envs, horizon, dx)
+        context_actions = meta['context_actions']  # Shape: (num_envs, horizon, du)
+        context_rewards = meta['context_rewards'][:, :, 0]  # Shape: (num_envs, horizon)
+        
+        # Create trajectories for each environment
+        for env_idx, env in enumerate(envs):
             for k in range(n_samples):
                 query_state = np.array([1])
                 optimal_action = env.opt_a
@@ -179,9 +238,9 @@ def collect_rollout_data_linear_bandit(model, envs, horizon, n_hists, n_samples,
                 traj = {
                     'query_state': query_state,
                     'optimal_action': optimal_action,
-                    'context_states': context_states,
-                    'context_actions': context_actions,
-                    'context_rewards': context_rewards,
+                    'context_states': context_states[env_idx],  # Shape: (horizon, dx)
+                    'context_actions': context_actions[env_idx],  # Shape: (horizon, du)
+                    'context_rewards': context_rewards[env_idx],  # Shape: (horizon,)
                     'means': env.means,
                     'arms': arms,
                     'theta': env.theta,
@@ -189,39 +248,186 @@ def collect_rollout_data_linear_bandit(model, envs, horizon, n_hists, n_samples,
                 }
                 trajs.append(traj)
     
+    print(f"\n  Collected {len(trajs)} trajectories total")
+    import sys
+    sys.stdout.flush()
     return trajs
 
 
 def collect_rollout_data_darkroom(model, envs, horizon, n_hists, n_samples, sample_action=True):
     """
     Collect rollout data using the current model for darkroom environments.
+    Uses vectorized rollout approach similar to evaluation code.
+    
+    Args:
+        model: The current model (always required, even if randomly initialized)
+        envs: List of darkroom environments
+        horizon: Context horizon
+        n_hists: Number of histories per environment
+        n_samples: Number of samples per history
+        sample_action: Whether to sample actions from the model
+        
+    Returns:
+        List of trajectories in the format expected by Dataset
+        Also returns rollout_data dict with rewards and states for visualization (if n_hists == 1)
     """
+    from envs.darkroom_env import DarkroomEnvVec
+    from utils import convert_to_tensor
+    
     trajs = []
     
-    # Create controller
-    if model is None:
-        controller = None
-    else:
-        controller = DarkroomTransformerController(model, batch_size=1, sample=sample_action)
+    # Set model to eval mode for inference
+    model.eval()
     
-    for env in envs:
-        for j in range(n_hists):
-            # Roll out one history
-            context_states, context_actions, context_next_states, context_rewards = _rollout_darkroom_single(
-                env, controller, horizon
-            )
-            
+    # Create vectorized environment
+    vec_env = DarkroomEnvVec(envs)
+    num_envs = len(envs)
+    
+    # Create controller with batch_size matching number of environments
+    controller = DarkroomTransformerController(model, batch_size=num_envs, sample=sample_action)
+    
+    # Store rollout data for visualization (only for first history if n_hists == 1)
+    rollout_data = None
+    if n_hists == 1:
+        # Store step-level rewards and states for visualization
+        # Shape: (num_envs, horizon) for rewards, (num_envs, horizon, 2) for states
+        rollout_rewards = []
+        rollout_states = []
+        rollout_actions = []
+    
+    # Collect n_hists histories for all environments at once
+    for j in range(n_hists):
+        if n_hists > 1:
+            print(f"  History {j+1}/{n_hists}...")
+            import sys
+            sys.stdout.flush()
+        
+        # Collect rollout data using vectorized approach
+        # Use torch tensors to avoid repeated conversions
+        context_states_t = torch.zeros((num_envs, horizon, vec_env.state_dim)).float().to(device)
+        context_actions_t = torch.zeros((num_envs, horizon, vec_env.action_dim)).float().to(device)
+        context_next_states_t = torch.zeros((num_envs, horizon, vec_env.state_dim)).float().to(device)
+        context_rewards_t = torch.zeros((num_envs, horizon, 1)).float().to(device)
+        
+        # Reset all environments
+        states = vec_env.reset()
+        states_t = torch.tensor(np.array(states)).float().to(device)  # (num_envs, state_dim)
+        
+        with torch.no_grad():  # No gradients needed during rollout
+            step_times = []
+            for h in range(horizon):
+                step_start = time.time()
+                if h % max(1, horizon // 10) == 0 or h == horizon - 1:
+                    avg_time = np.mean(step_times) if step_times else 0
+                    print(f"    Step {h+1}/{horizon} (avg: {avg_time*1000:.1f}ms/step)...", end='\r')
+                    import sys
+                    sys.stdout.flush()
+                
+                # Prepare batch with accumulated context
+                if h == 0:
+                    # Empty context - create dummy context
+                    batch = {
+                        'context_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
+                        'context_actions': torch.zeros((num_envs, 1, vec_env.action_dim)).float().to(device),
+                        'context_next_states': torch.zeros((num_envs, 1, vec_env.state_dim)).float().to(device),
+                        'context_rewards': torch.zeros((num_envs, 1, 1)).float().to(device),
+                    }
+                else:
+                    batch = {
+                        'context_states': context_states_t[:, :h, :],
+                        'context_actions': context_actions_t[:, :h, :],
+                        'context_next_states': context_next_states_t[:, :h, :],
+                        'context_rewards': context_rewards_t[:, :h, :],
+                    }
+                controller.set_batch(batch)
+                
+                # Get actions from controller
+                # Controller.act() expects a list, but we can pass numpy array directly
+                # Convert tensor to numpy once
+                states_np = states_t.cpu().numpy()
+                # Controller will convert to tensor internally, but this avoids list conversion overhead
+                states_list = [states_np[i] for i in range(num_envs)]
+                actions = controller.act(states_list)  # Returns (num_envs, action_dim) array
+                
+                # Convert to list format for step() - actions is already numpy array
+                actions_list = [actions[i] for i in range(num_envs)]
+                
+                # Execute in environments
+                next_states_list, rewards_list, dones, _ = vec_env.step(actions_list)
+                
+                # Store transitions (convert to tensor once, batch conversion)
+                next_states_t = torch.tensor(np.array(next_states_list), dtype=torch.float32).to(device)
+                rewards_t = torch.tensor(np.array(rewards_list), dtype=torch.float32).to(device).unsqueeze(1)
+                actions_t = torch.tensor(actions, dtype=torch.float32).to(device)
+                
+                context_states_t[:, h, :] = states_t
+                context_actions_t[:, h, :] = actions_t
+                context_next_states_t[:, h, :] = next_states_t
+                context_rewards_t[:, h, :] = rewards_t
+                
+                states_t = next_states_t
+                states = next_states_list
+                
+                step_times.append(time.time() - step_start)
+        
+        # Convert to numpy at the end
+        context_states = context_states_t.cpu().numpy()
+        context_actions = context_actions_t.cpu().numpy()
+        context_next_states = context_next_states_t.cpu().numpy()
+        context_rewards = context_rewards_t.cpu().numpy()[:, :, 0]  # Remove last dimension
+        
+        # Store rollout data for visualization (only for first history)
+        if n_hists == 1 and j == 0:
+            rollout_rewards.append(context_rewards)  # Shape: (num_envs, horizon)
+            rollout_states.append(context_states)  # Shape: (num_envs, horizon, 2)
+            rollout_actions.append(context_actions)  # Shape: (num_envs, horizon, 5)
+        
+        # Create trajectories for each environment
+        for env_idx, env in enumerate(envs):
             for k in range(n_samples):
+                # For MDPs, compute optimal action for each state in the context sequence
+                # This is state-dependent: each state gets its own optimal action
+                context_states_env = context_states[env_idx]  # Shape: (horizon, state_dim)
+                optimal_actions = np.array([
+                    env.opt_action(context_states_env[h]) 
+                    for h in range(horizon)
+                ])  # Shape: (horizon, action_dim)
+                
+                # Also keep query_state for backward compatibility (though not used in training)
                 query_state = env.sample_state()
-                optimal_action = env.opt_action(query_state)
+                query_optimal_action = env.opt_action(query_state)
+                
+                # Debug: Log first few trajectories to verify state-dependence
+                if len(trajs) < 5:
+                    # Map action indices to names for darkroom
+                    action_names = {0: "right", 1: "left", 2: "up", 3: "down", 4: "stay"}
+                    
+                    # Format context states and actions
+                    context_strs = []
+                    context_actions_env = context_actions[env_idx]  # Shape: (horizon, action_dim)
+                    for h in range(min(horizon, 10)):  # Show first 10 context states
+                        state = context_states_env[h]
+                        policy_action_idx = np.argmax(context_actions_env[h])  # Action policy took
+                        optimal_action_idx = np.argmax(optimal_actions[h])  # Optimal action for this state
+                        policy_action_name = action_names.get(policy_action_idx, f"action_{policy_action_idx}")
+                        optimal_action_name = action_names.get(optimal_action_idx, f"action_{optimal_action_idx}")
+                        context_strs.append(f"{tuple(state)}: {policy_action_name} (opt: {optimal_action_name})")
+                    
+                    if horizon > 10:
+                        context_strs.append("...")
+                    
+                    goal_str = f"Goal state: {tuple(env.goal)}"
+                    context_str = ", ".join(context_strs)
+                    print(f"  Debug traj {len(trajs)}: {goal_str}, context: {context_str}")
                 
                 traj = {
-                    'query_state': query_state,
-                    'optimal_action': optimal_action,
-                    'context_states': context_states,
-                    'context_actions': context_actions,
-                    'context_next_states': context_next_states,
-                    'context_rewards': context_rewards,
+                    'query_state': query_state,  # Kept for backward compatibility
+                    'optimal_action': query_optimal_action,  # Kept for backward compatibility
+                    'optimal_actions': optimal_actions,  # NEW: optimal actions for each context state
+                    'context_states': context_states[env_idx],  # Shape: (horizon, state_dim)
+                    'context_actions': context_actions[env_idx],  # Shape: (horizon, action_dim)
+                    'context_next_states': context_next_states[env_idx],  # Shape: (horizon, state_dim)
+                    'context_rewards': context_rewards[env_idx],  # Shape: (horizon,)
                     'goal': env.goal,
                 }
                 
@@ -231,59 +437,21 @@ def collect_rollout_data_darkroom(model, envs, horizon, n_hists, n_samples, samp
                 
                 trajs.append(traj)
     
-    return trajs
-
-
-def _rollout_darkroom_single(env, controller, horizon):
-    """
-    Roll out a single history for a darkroom environment.
-    """
-    states = []
-    actions = []
-    next_states = []
-    rewards = []
+    print(f"\n  Collected {len(trajs)} trajectories total")
+    import sys
+    sys.stdout.flush()
     
-    state = env.reset()
+    # Prepare rollout_data for visualization
+    if n_hists == 1 and rollout_rewards:
+        rollout_data = {
+            'rewards': rollout_rewards[0],  # Shape: (num_envs, horizon)
+            'states': rollout_states[0],  # Shape: (num_envs, horizon, 2)
+            'actions': rollout_actions[0],  # Shape: (num_envs, horizon, 5)
+        }
+    else:
+        rollout_data = None
     
-    for _ in range(horizon):
-        if controller is None:
-            # Random action
-            action = env.sample_action()
-        else:
-            # Use model to get action
-            # Build context from accumulated history
-            if len(states) == 0:
-                # Empty context
-                batch = {
-                    'context_states': torch.zeros((1, 1, env.state_dim)).float().to(device),
-                    'context_actions': torch.zeros((1, 1, env.action_dim)).float().to(device),
-                    'context_next_states': torch.zeros((1, 1, env.state_dim)).float().to(device),
-                    'context_rewards': torch.zeros((1, 1, 1)).float().to(device),
-                }
-            else:
-                batch = {
-                    'context_states': torch.tensor(np.array(states))[None, :, :].float().to(device),
-                    'context_actions': torch.tensor(np.array(actions))[None, :, :].float().to(device),
-                    'context_next_states': torch.tensor(np.array(next_states))[None, :, :].float().to(device),
-                    'context_rewards': torch.tensor(np.array(rewards))[None, :, None].float().to(device),
-                }
-            controller.set_batch(batch)
-            action = controller.act(state)
-        
-        next_state, reward = env.transit(state, action)
-        
-        states.append(state)
-        actions.append(action)
-        next_states.append(next_state)
-        rewards.append(reward)
-        state = next_state
-    
-    states = np.array(states)
-    actions = np.array(actions)
-    next_states = np.array(next_states)
-    rewards = np.array(rewards)
-    
-    return states, actions, next_states, rewards
+    return trajs, rollout_data
 
 
 if __name__ == '__main__':
@@ -509,7 +677,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
 
-    test_loss = []
+    # test_loss = []  # Commented out: test logic disabled
     train_loss = []
 
     # Metrics persistence to preserve curves across resumes
@@ -518,7 +686,7 @@ if __name__ == '__main__':
         try:
             loaded = np.load(metrics_path, allow_pickle=True)
             train_loss = list(loaded.get('train_loss', np.array([])).tolist())
-            test_loss = list(loaded.get('test_loss', np.array([])).tolist())
+            # test_loss = list(loaded.get('test_loss', np.array([])).tolist())  # Commented out: test logic disabled
             printw(f"Loaded previous metrics from {metrics_path} (epochs={len(train_loss)})")
         except Exception as e:
             printw(f"Warning: Failed to load metrics from {metrics_path}: {e}")
@@ -528,7 +696,7 @@ if __name__ == '__main__':
 
     # Prepare environment generation parameters
     n_train_envs = int(.8 * n_envs)
-    n_test_envs = n_envs - n_train_envs
+    # n_test_envs = n_envs - n_train_envs  # Commented out: test logic disabled
     
     # For linear bandit, generate arms once
     arms = None
@@ -547,37 +715,39 @@ if __name__ == '__main__':
         
         # STEP 1: Collect rollout data using current model
         printw(f"Collecting rollout data for epoch {current_epoch}...")
+        printw(f"  n_train_envs={n_train_envs}, n_hists={n_hists}, n_samples={n_samples}, horizon={horizon}")
         rollout_start_time = time.time()
         
-        # For epoch 0 (before training), use None model (random rollout)
-        # For subsequent epochs, use the current model
-        rollout_model = None if current_epoch == 1 else model
+        # Always use the current model (even if randomly initialized for first epoch)
+        # The model will sample actions based on its current parameters
+        rollout_model = model
         
+        rollout_data = None  # Initialize for non-darkroom environments
         if env == 'bandit':
             # Create training environments
             train_envs = [bandit_env.sample(dim, horizon, var) for _ in range(n_train_envs)]
-            test_envs = [bandit_env.sample(dim, horizon, var) for _ in range(n_test_envs)]
+            # test_envs = [bandit_env.sample(dim, horizon, var) for _ in range(n_test_envs)]  # Commented out: test logic disabled
             
-            # Collect rollout data
+            # Collect rollout data using vectorized rollout (same as evaluation)
             train_trajs = collect_rollout_data_bandit(
                 rollout_model, train_envs, horizon, n_hists, n_samples, sample_action
             )
-            test_trajs = collect_rollout_data_bandit(
-                rollout_model, test_envs, horizon, n_hists, n_samples, sample_action
-            )
+            # test_trajs = collect_rollout_data_bandit(
+            #     rollout_model, test_envs, horizon, n_hists, n_samples, sample_action
+            # )  # Commented out: test logic disabled
             
         elif env == 'linear_bandit':
             # Create training environments
             train_envs = [bandit_env.sample_linear(arms, horizon, var) for _ in range(n_train_envs)]
-            test_envs = [bandit_env.sample_linear(arms, horizon, var) for _ in range(n_test_envs)]
+            # test_envs = [bandit_env.sample_linear(arms, horizon, var) for _ in range(n_test_envs)]  # Commented out: test logic disabled
             
             # Collect rollout data
             train_trajs = collect_rollout_data_linear_bandit(
                 rollout_model, train_envs, horizon, n_hists, n_samples, arms, sample_action
             )
-            test_trajs = collect_rollout_data_linear_bandit(
-                rollout_model, test_envs, horizon, n_hists, n_samples, arms, sample_action
-            )
+            # test_trajs = collect_rollout_data_linear_bandit(
+            #     rollout_model, test_envs, horizon, n_hists, n_samples, arms, sample_action
+            # )  # Commented out: test logic disabled
             
         elif env.startswith('darkroom'):
             # Create training environments
@@ -585,25 +755,25 @@ if __name__ == '__main__':
             np.random.RandomState(seed=0).shuffle(goals)
             train_test_split = int(.8 * len(goals))
             train_goals = goals[:train_test_split]
-            test_goals = goals[train_test_split:]
+            # test_goals = goals[train_test_split:]  # Commented out: test logic disabled
             
             train_goals = np.repeat(train_goals, max(1, n_train_envs // len(train_goals)), axis=0)[:n_train_envs]
-            test_goals = np.repeat(test_goals, max(1, n_test_envs // len(test_goals)), axis=0)[:n_test_envs]
+            # test_goals = np.repeat(test_goals, max(1, n_test_envs // len(test_goals)), axis=0)[:n_test_envs]  # Commented out: test logic disabled
             
             if env == 'darkroom_heldout':
                 train_envs = [darkroom_env.DarkroomEnv(dim, goal, horizon) for goal in train_goals]
-                test_envs = [darkroom_env.DarkroomEnv(dim, goal, horizon) for goal in test_goals]
+                # test_envs = [darkroom_env.DarkroomEnv(dim, goal, horizon) for goal in test_goals]  # Commented out: test logic disabled
             else:
                 train_envs = [darkroom_env.DarkroomEnvPermuted(dim, i, horizon) for i in range(n_train_envs)]
-                test_envs = [darkroom_env.DarkroomEnvPermuted(dim, i + n_train_envs, horizon) for i in range(n_test_envs)]
+                # test_envs = [darkroom_env.DarkroomEnvPermuted(dim, i + n_train_envs, horizon) for i in range(n_test_envs)]  # Commented out: test logic disabled
             
             # Collect rollout data
-            train_trajs = collect_rollout_data_darkroom(
+            train_trajs, rollout_data = collect_rollout_data_darkroom(
                 rollout_model, train_envs, horizon, n_hists, n_samples, sample_action
             )
-            test_trajs = collect_rollout_data_darkroom(
-                rollout_model, test_envs, horizon, n_hists, n_samples, sample_action
-            )
+            # test_trajs = collect_rollout_data_darkroom(
+            #     rollout_model, test_envs, horizon, n_hists, n_samples, sample_action
+            # )  # Commented out: test logic disabled
             
         else:
             raise NotImplementedError(f"Environment {env} not yet supported for rollout training")
@@ -613,15 +783,23 @@ if __name__ == '__main__':
             train_path = f_train.name
             pickle.dump(train_trajs, f_train)
         
-        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pkl', dir='datasets') as f_test:
-            test_path = f_test.name
-            pickle.dump(test_trajs, f_test)
+        # Store rollout_data for visualization (only for darkroom)
+        train_rollout_data = rollout_data if env.startswith('darkroom') else None
+        # Store train_envs for visualization (only for darkroom)
+        train_envs_for_viz = train_envs if env.startswith('darkroom') else None
+        
+        # with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pkl', dir='datasets') as f_test:
+        #     test_path = f_test.name
+        #     pickle.dump(test_trajs, f_test)
+        # Commented out: test logic disabled
         
         rollout_time = time.time() - rollout_start_time
-        printw(f"Collected {len(train_trajs)} training trajectories and {len(test_trajs)} test trajectories")
+        printw(f"Collected {len(train_trajs)} training trajectories")  # Removed test trajectory count
         printw(f"Rollout time: {rollout_time:.2f}s")
         
         # STEP 2: Create datasets and dataloaders
+        printw("Creating datasets and dataloaders...")
+        dataset_start_time = time.time()
         if env == 'miniworld':
             transform = transforms.Compose([
                 transforms.ToTensor(),
@@ -637,46 +815,49 @@ if __name__ == '__main__':
                 'worker_init_fn': worker_init_fn,
             })
             train_dataset = ImageDataset([train_path], config, transform)
-            test_dataset = ImageDataset([test_path], config, transform)
+            # test_dataset = ImageDataset([test_path], config, transform)  # Commented out: test logic disabled
         else:
             train_dataset = Dataset(train_path, config)
-            test_dataset = Dataset(test_path, config)
+            # test_dataset = Dataset(test_path, config)  # Commented out: test logic disabled
         
         train_loader = torch.utils.data.DataLoader(train_dataset, **params)
-        test_loader = torch.utils.data.DataLoader(test_dataset, **params)
+        # test_loader = torch.utils.data.DataLoader(test_dataset, **params)  # Commented out: test logic disabled
         
+        dataset_time = time.time() - dataset_start_time
         printw(f"Num train batches: {len(train_loader)}")
-        printw(f"Num test batches: {len(test_loader)}")
+        printw(f"Dataset creation time: {dataset_time:.2f}s")
+        # printw(f"Num test batches: {len(test_loader)}")  # Commented out: test logic disabled
         
         # STEP 3: Evaluate on test set
-        printw("Evaluating on test set...")
-        start_time = time.time()
-        with torch.no_grad():
-            epoch_test_loss = 0.0
-            epoch_test_entropy = 0.0
-            for i, batch in enumerate(test_loader):
-                print(f"Test batch {i} of {len(test_loader)}", end='\r')
-                batch = {k: v.to(device) for k, v in batch.items()}
-                true_actions = batch['optimal_actions']
-                pred_actions, _ = model(batch)
-                true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)
-                true_actions = true_actions.reshape(-1, action_dim)
-                pred_actions = pred_actions.reshape(-1, action_dim)
-
-                loss = loss_fn(pred_actions, true_actions)
-                epoch_test_loss += loss.item() / horizon
-                
-                # Compute entropy
-                pred_probs = torch.softmax(pred_actions, dim=-1)
-                entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).sum()
-                epoch_test_entropy += entropy.item() / horizon
-
-        test_loss.append(epoch_test_loss / len(test_dataset))
-        test_entropy_val = (epoch_test_entropy / len(test_dataset))
-        end_time = time.time()
-        printw(f"\tTest loss: {test_loss[-1]}")
-        printw(f"\tTest entropy: {test_entropy_val:.4f}")
-        printw(f"\tEval time: {end_time - start_time:.2f}s")
+        # Commented out: test logic disabled
+        # printw("Evaluating on test set...")
+        # start_time = time.time()
+        # with torch.no_grad():
+        #     epoch_test_loss = 0.0
+        #     epoch_test_entropy = 0.0
+        #     for i, batch in enumerate(test_loader):
+        #         print(f"Test batch {i} of {len(test_loader)}", end='\r')
+        #         batch = {k: v.to(device) for k, v in batch.items()}
+        #         true_actions = batch['optimal_actions']
+        #         pred_actions, _ = model(batch)
+        #         true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)
+        #         true_actions = true_actions.reshape(-1, action_dim)
+        #         pred_actions = pred_actions.reshape(-1, action_dim)
+        #
+        #         loss = loss_fn(pred_actions, true_actions)
+        #         epoch_test_loss += loss.item() / horizon
+        #         
+        #         # Compute entropy
+        #         pred_probs = torch.softmax(pred_actions, dim=-1)
+        #         entropy = -torch.sum(pred_probs * torch.log(pred_probs + 1e-10), dim=-1).sum()
+        #         epoch_test_entropy += entropy.item() / horizon
+        #
+        # test_loss.append(epoch_test_loss / len(test_dataset))
+        # test_entropy_val = (epoch_test_entropy / len(test_dataset))
+        # end_time = time.time()
+        # printw(f"\tTest loss: {test_loss[-1]}")
+        # printw(f"\tTest entropy: {test_entropy_val:.4f}")
+        # printw(f"\tEval time: {end_time - start_time:.2f}s")
 
         # STEP 4: Train for one epoch
         printw("Training...")
@@ -687,9 +868,19 @@ if __name__ == '__main__':
         for i, batch in enumerate(train_loader):
             print(f"Train batch {i} of {len(train_loader)}", end='\r')
             batch = {k: v.to(device) for k, v in batch.items()}
-            true_actions = batch['optimal_actions']
             pred_actions, _ = model(batch)
-            true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)
+            
+            # For MDPs, use optimal_actions_per_state if available (one optimal action per context state)
+            # For bandits, fall back to repeating single optimal_action
+            if 'optimal_actions_per_state' in batch and batch['optimal_actions_per_state'] is not None:
+                # Use per-state optimal actions (shape: [batch, horizon, action_dim])
+                true_actions = batch['optimal_actions_per_state']  # Already has shape [batch, horizon, action_dim]
+            else:
+                # Fall back to single optimal_action (for bandit environments)
+                true_actions = batch['optimal_actions']
+                true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)
+            
+            # Reshape for loss computation
             true_actions = true_actions.reshape(-1, action_dim)
             pred_actions = pred_actions.reshape(-1, action_dim)
 
@@ -719,12 +910,95 @@ if __name__ == '__main__':
             "train_alpha": 1.0,
             "train_beta": 0.0,
             "total_loss": train_loss[-1],
-            "test_loss": test_loss[-1],
-            "test_ce_loss": test_loss[-1],
-            "test_entropy": test_entropy_val,
+            # "test_loss": test_loss[-1],  # Commented out: test logic disabled
+            # "test_ce_loss": test_loss[-1],  # Commented out: test logic disabled
+            # "test_entropy": test_entropy_val,  # Commented out: test logic disabled
             "rollout_time": rollout_time,
-            "eval_time": end_time - start_time,
+            "train_time": end_time - start_time,  # Changed from eval_time to train_time
         })
+        
+        # Plot training rollout rewards and paths (for darkroom)
+        if train_rollout_data is not None and env.startswith('darkroom') and train_envs_for_viz is not None:
+            rollout_rewards = train_rollout_data['rewards']  # Shape: (num_envs, horizon)
+            rollout_states = train_rollout_data['states']  # Shape: (num_envs, horizon, 2)
+            rollout_actions = train_rollout_data['actions']  # Shape: (num_envs, horizon, 5)
+            
+            # Compute step-level statistics
+            step_rewards_mean = np.mean(rollout_rewards, axis=0)  # Shape: (horizon,)
+            step_rewards_sem = scipy.stats.sem(rollout_rewards, axis=0)  # Shape: (horizon,)
+            step_indices = np.arange(horizon)
+            
+            # Sample 5 random environments for visualization (same as eval)
+            np.random.seed(42 + current_epoch)  # For reproducibility with epoch variation
+            num_samples = min(5, n_train_envs)
+            sample_env_indices = np.random.choice(n_train_envs, size=num_samples, replace=False)
+            
+            # Different colors for each rollout (same as eval)
+            rollout_colors = ['orange', 'purple', 'brown', 'pink', 'cyan']
+            
+            # Create online plot - step-level performance showing context accumulation
+            fig_online, ax = plt.subplots(1, 1, figsize=(10, 6))
+            
+            # Plot individual trajectories (first 10 environments) in light blue
+            for i in range(min(n_train_envs, 10)):
+                cumulative_returns = np.cumsum(rollout_rewards[i])
+                ax.plot(cumulative_returns, color='blue', alpha=0.1, linewidth=1)
+            
+            # Plot sample rollouts with explicit labels and colors (like eval)
+            log_offset = 0.1
+            for i, env_idx in enumerate(sample_env_indices):
+                rollout_rewards_env = rollout_rewards[env_idx]  # Shape: (horizon,)
+                cumulative_returns = np.cumsum(rollout_rewards_env)
+                color = rollout_colors[i % len(rollout_colors)]
+                cumulative_returns_log = cumulative_returns + log_offset
+                ax.plot(cumulative_returns_log, color=color, alpha=0.6, linewidth=1.5,
+                       linestyle='--', label=f'Rollout {i+1} (Env {env_idx})')
+            
+            # Plot mean cumulative returns
+            cumulative_returns_mean = np.cumsum(step_rewards_mean)
+            cumulative_returns_mean_log = cumulative_returns_mean + log_offset
+            cumulative_sem = np.cumsum(step_rewards_sem)
+            
+            ax.plot(cumulative_returns_mean_log, label='Train (mean cumulative)', color='blue', linewidth=2)
+            ax.fill_between(step_indices,
+                            cumulative_returns_mean_log - cumulative_sem,
+                            cumulative_returns_mean_log + cumulative_sem,
+                            alpha=0.2, color='blue')
+            
+            ax.set_xlabel('Step (Context Accumulation)')
+            ax.set_ylabel('Cumulative Return (log scale, offset=0.1)')
+            ax.set_yscale('log')
+            ax.set_title(f'Train Rollout: Step-Level Performance (n={n_train_envs} envs)')
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            wandb.log({f"train/online_image": wandb.Image(fig_online)}, commit=False)
+            plt.close(fig_online)
+            
+            # Create path visualizations for sample rollouts (5 random rollouts)
+            fig_paths, axes = plt.subplots(1, num_samples, figsize=(5*num_samples, 5))
+            if num_samples == 1:
+                axes = [axes]
+            
+            for idx, env_idx in enumerate(sample_env_indices):
+                ax = axes[idx]
+                states = rollout_states[env_idx]  # Shape: (horizon, 2)
+                actions = rollout_actions[env_idx]  # Shape: (horizon, 5)
+                
+                # Get goal for this environment using stored train_envs_for_viz
+                if env == 'darkroom_heldout':
+                    goal = train_envs_for_viz[env_idx].goal
+                else:
+                    # For DarkroomEnvPermuted, goal is always at bottom right
+                    goal = np.array([dim - 1, dim - 1])
+                
+                _visualize_rollout_path_single_ax(ax, states, actions, goal, dim,
+                                                 f'Train Rollout {idx+1} (Env {env_idx})')
+            
+            plt.tight_layout()
+            wandb.log({f"train/path_visualization": wandb.Image(fig_paths)}, commit=False)
+            plt.close(fig_paths)
 
         # Save checkpoint
         if (epoch + 1) % args.get('eval_every', 10) == 0:
@@ -745,7 +1019,7 @@ if __name__ == '__main__':
         # Clean up temporary files
         try:
             os.unlink(train_path)
-            os.unlink(test_path)
+            # os.unlink(test_path)  # Commented out: test logic disabled
         except Exception as e:
             printw(f"Warning: Failed to delete temporary files: {e}")
 
@@ -755,7 +1029,7 @@ if __name__ == '__main__':
                 np.savez_compressed(
                     metrics_path,
                     train_loss=np.array(train_loss),
-                    test_loss=np.array(test_loss),
+                    # test_loss=np.array(test_loss),  # Commented out: test logic disabled
                 )
             except Exception as e:
                 printw(f"Warning: Failed to save metrics to {metrics_path}: {e}")

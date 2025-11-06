@@ -68,24 +68,34 @@ class Transformer(nn.Module):
         batch_size = context_states.shape[0]
         seq_len = context_states.shape[1]
         
-        # Handle empty sequence case (shouldn't happen, but guard against it)
-        if seq_len == 0:
-            # Create dummy single-element sequence
-            device = context_states.device
-            context_states = torch.zeros((batch_size, 1, self.state_dim), device=device)
-            context_actions = torch.zeros((batch_size, 1, self.action_dim), device=device)
-            context_rewards = torch.zeros((batch_size, 1, 1), device=device)
-            seq_len = 1
+        # # Handle empty sequence case (shouldn't happen, but guard against it)
+        # if seq_len == 0:
+        #     # Create dummy single-element sequence
+        #     device = context_states.device
+        #     context_states = torch.zeros((batch_size, 1, self.state_dim), device=device)
+        #     context_actions = torch.zeros((batch_size, 1, self.action_dim), device=device)
+        #     context_rewards = torch.zeros((batch_size, 1, 1), device=device)
+        #     seq_len = 1
         
         # Embed each modality separately
         state_embeds = self.embed_state(context_states)  # [batch, seq_len, n_embd]
         action_embeds = self.embed_action(context_actions)  # [batch, seq_len, n_embd]
         reward_embeds = self.embed_reward(context_rewards)  # [batch, seq_len, n_embd]
         
-        # Stack them as separate positions: (s_0, a_0, r_0, s_1, a_1, r_1, ...)
-        stacked_inputs = torch.stack(
-            (state_embeds, action_embeds, reward_embeds), dim=1
-        ).permute(0, 2, 1, 3).reshape(batch_size, 3 * seq_len, self.n_embd)
+        # For darkroom and miniworld: use (s, r, a) ordering
+        # For other environments: use (s, a, r) ordering
+        # Detect darkroom/miniworld by state_dim=2 and action_dim in [4, 5]
+        is_darkroom_or_miniworld = (self.state_dim == 2 and self.action_dim in [4, 5])
+        if is_darkroom_or_miniworld:
+            # Stack as (s_0, r_0, a_0, s_1, r_1, a_1, ...)
+            stacked_inputs = torch.stack(
+                (state_embeds, reward_embeds, action_embeds), dim=1
+            ).permute(0, 2, 1, 3).reshape(batch_size, 3 * seq_len, self.n_embd)
+        else:
+            # Stack as (s_0, a_0, r_0, s_1, a_1, r_1, ...)
+            stacked_inputs = torch.stack(
+                (state_embeds, action_embeds, reward_embeds), dim=1
+            ).permute(0, 2, 1, 3).reshape(batch_size, 3 * seq_len, self.n_embd)
         
         stacked_inputs = self.embed_ln(stacked_inputs)
         
@@ -108,7 +118,7 @@ class Transformer(nn.Module):
         
         hidden_state = transformer_outputs['last_hidden_state']
         
-        # Reshape output: [batch, seq_len, 3, n_embd] where dim 2 is (state, action, reward)
+        # Reshape output: [batch, seq_len, 3, n_embd] where dim 2 is (state, action, reward) or (state, reward, action)
         x = hidden_state.reshape(batch_size, seq_len, 3, self.n_embd).permute(0, 2, 1, 3)
         
         # If return_dict, return transformer outputs for caching
@@ -203,9 +213,11 @@ class ImageTransformer(Transformer):
         action_embeds = self.embed_action(context_actions)  # [batch, seq_len, n_embd]
         reward_embeds = self.embed_reward(context_rewards)  # [batch, seq_len, n_embd]
 
-        # Stack them as separate positions: (img+state_0, a_0, r_0, img+state_1, a_1, r_1, ...)
+        # For miniworld (ImageTransformer): use (img+state, reward, action) ordering
+        # ImageTransformer is only used for miniworld, so always use (s, r, a) ordering
+        # Stack as (img+state_0, r_0, a_0, img+state_1, r_1, a_1, ...)
         stacked_inputs = torch.stack(
-            (image_state_embeds, action_embeds, reward_embeds), dim=1
+            (image_state_embeds, reward_embeds, action_embeds), dim=1
         ).permute(0, 2, 1, 3).reshape(batch_size, 3 * seq_len, self.n_embd)
         
         stacked_inputs = self.embed_ln(stacked_inputs)
@@ -229,7 +241,7 @@ class ImageTransformer(Transformer):
         
         hidden_state = transformer_outputs['last_hidden_state']
         
-        # Reshape output: [batch, seq_len, 3, n_embd] where dim 2 is (image+state, action, reward)
+        # Reshape output: [batch, seq_len, 3, n_embd] where dim 2 is (image+state, reward, action)
         x = hidden_state.reshape(batch_size, seq_len, 3, self.n_embd).permute(0, 2, 1, 3)
         
         # If return_dict, return transformer outputs for caching

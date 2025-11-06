@@ -400,10 +400,19 @@ if __name__ == '__main__':
             for i, batch in enumerate(test_loader):
                 print(f"Batch {i} of {len(test_loader)}", end='\r')
                 batch = {k: v.to(device) for k, v in batch.items()}
-                true_actions = batch['optimal_actions']
                 pred_actions, _ = model(batch)  # Unpack tuple to get predictions
-                true_actions = true_actions.unsqueeze(
-                    1).repeat(1, pred_actions.shape[1], 1)
+                
+                # For MDPs, use optimal_actions_per_state if available (one optimal action per context state)
+                # For bandits, fall back to repeating single optimal_action
+                if 'optimal_actions_per_state' in batch and batch['optimal_actions_per_state'] is not None:
+                    # Use per-state optimal actions (shape: [batch, horizon, action_dim])
+                    true_actions = batch['optimal_actions_per_state']  # Already has shape [batch, horizon, action_dim]
+                else:
+                    # Fall back to single optimal_action (for bandit environments)
+                    true_actions = batch['optimal_actions']
+                    true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)
+                
+                # Reshape for loss computation
                 true_actions = true_actions.reshape(-1, action_dim)
                 pred_actions = pred_actions.reshape(-1, action_dim)
 
@@ -432,10 +441,19 @@ if __name__ == '__main__':
         for i, batch in enumerate(train_loader):
             print(f"Batch {i} of {len(train_loader)}", end='\r')
             batch = {k: v.to(device) for k, v in batch.items()}
-            true_actions = batch['optimal_actions']
             pred_actions, _ = model(batch)  # Unpack tuple to get predictions
-            true_actions = true_actions.unsqueeze(
-                1).repeat(1, pred_actions.shape[1], 1)
+            
+            # For MDPs, use optimal_actions_per_state if available (one optimal action per context state)
+            # For bandits, fall back to repeating single optimal_action
+            if 'optimal_actions_per_state' in batch and batch['optimal_actions_per_state'] is not None:
+                # Use per-state optimal actions (shape: [batch, horizon, action_dim])
+                true_actions = batch['optimal_actions_per_state']  # Already has shape [batch, horizon, action_dim]
+            else:
+                # Fall back to single optimal_action (for bandit environments)
+                true_actions = batch['optimal_actions']
+                true_actions = true_actions.unsqueeze(1).repeat(1, pred_actions.shape[1], 1)
+            
+            # Reshape for loss computation
             true_actions = true_actions.reshape(-1, action_dim)
             pred_actions = pred_actions.reshape(-1, action_dim)
 
